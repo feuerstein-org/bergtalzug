@@ -9,13 +9,6 @@ run = [
     "uv run pre-commit install"
 ]
 
-[tasks.bergtalzug]
-description = "Simple script to run main function"
-run = [
-    "uv run python -m bergtalzug.main"
-    # "uv run pre-commit install"
-]
-
 [tasks.pre-commit]
 description = "Run pre-commit hooks on all files"
 depends = ["lint-fix"]
