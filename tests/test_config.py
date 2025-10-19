@@ -130,7 +130,7 @@ def test_process_is_sync_set_to_true_when_sync_process_defined() -> None:
     class TestSyncPipeline(ETLPipeline):  # pragma: no cover
         async def refill_queue(self, count: int) -> list[WorkItem]:
             """Empty fetch"""
-            return [WorkItem(b"test")]
+            return [WorkItem("test")]
 
         async def fetch(self, item: WorkItem) -> WorkItem:
             """Empty fetch"""
@@ -156,7 +156,7 @@ def test_process_is_sync_set_to_false_when_sync_process_not_defined() -> None:
     class TestSyncPipeline(ETLPipeline):  # pragma: no cover
         async def refill_queue(self, count: int) -> list[WorkItem]:
             """Empty fetch"""
-            return [WorkItem(b"test")]
+            return [WorkItem("test")]
 
         async def fetch(self, item: WorkItem) -> WorkItem:
             """Empty fetch"""

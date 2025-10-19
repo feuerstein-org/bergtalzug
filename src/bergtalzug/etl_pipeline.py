@@ -68,7 +68,7 @@ class WorkItem:
     Objects of this class will be passed through all the stages of the ETL pipeline.
     """
 
-    data: bytes
+    data: Any
     metadata: WorkItemMetadata = field(default_factory=WorkItemMetadata)
     job_id: str = field(default_factory=lambda: str(uuid4()))
 

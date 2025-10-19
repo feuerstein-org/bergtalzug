@@ -23,11 +23,11 @@ class CustomETLPipeline(ETLPipeline):
         self.logger.info("Refilling data...")
         if self.counter <= self.limit:
             if self.counter + count > self.limit:
-                work_items = [WorkItem(data=b"test") for _ in range(self.limit - self.counter)]
+                work_items = [WorkItem(data="test") for _ in range(self.limit - self.counter)]
                 self.counter += count
                 return work_items
             self.counter += count
-            return [WorkItem(data=b"test") for _ in range(count)]
+            return [WorkItem(data="test") for _ in range(count)]
         return []
 
     async def fetch(self, item: WorkItem) -> WorkItem:

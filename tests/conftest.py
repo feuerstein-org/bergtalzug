@@ -9,7 +9,7 @@ import asyncio
 import time
 
 
-def work_item_factory(count: int = 1, data: bytes = b"test_data") -> list[WorkItem]:
+def work_item_factory(count: int = 1, data: Any = "test_data") -> list[WorkItem]:
     """Create a list of WorkItem instances with custom data."""
     work_items: list[WorkItem] = []
     for _ in range(count):
@@ -111,13 +111,13 @@ class MockETLPipeline(ETLPipeline):
     async def _process_impl(self, item: WorkItem) -> WorkItem:
         if self.config.process_sleep is not None and self.config.process_sleep > 0:
             await asyncio.sleep(self.config.process_sleep)
-        item.data = b"processed_" + item.data
+        item.data = "processed_" + item.data
         return item
 
     def _sync_process_impl(self, item: WorkItem) -> WorkItem:
         if self.config.process_sleep is not None and self.config.process_sleep > 0:
             time.sleep(self.config.process_sleep)
-        item.data = b"processed_" + item.data
+        item.data = "processed_" + item.data
         return item
 
     async def _store_impl(self, item: WorkItem) -> None:

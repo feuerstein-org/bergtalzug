@@ -32,14 +32,14 @@ class TestWorkItem:
 
     def test_work_item_creation(self) -> None:
         """Test WorkItem is created with proper defaults"""
-        item = WorkItem(data=b"test")
-        assert item.data == b"test"
+        item = WorkItem(data="test")
+        assert item.data == "test"
         assert item.job_id is not None
         assert isinstance(item.metadata, WorkItemMetadata)
 
     def test_custom_job_id(self) -> None:
         """Test WorkItem with custom job_id"""
-        item = WorkItem(data=b"test", job_id="custom-123")
+        item = WorkItem(data="test", job_id="custom-123")
         assert item.job_id == "custom-123"
 
 

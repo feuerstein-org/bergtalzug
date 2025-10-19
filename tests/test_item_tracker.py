@@ -13,7 +13,7 @@ class TestItemTracker:
     async def test_register_item(self) -> None:
         """Test registering new items"""
         tracker = ItemTracker()
-        item = WorkItem(data=b"test")
+        item = WorkItem(data="test")
 
         await tracker.register_item(item)
         active_items = await tracker.get_active_items()
@@ -25,7 +25,7 @@ class TestItemTracker:
     async def test_create_and_update_item_stage(self) -> None:
         """Test updating item stages"""
         tracker = ItemTracker()
-        item = WorkItem(data=b"test")
+        item = WorkItem(data="test")
 
         await tracker.register_item(item)
 
@@ -42,7 +42,7 @@ class TestItemTracker:
     async def test_complete_item_success(self) -> None:
         """Test completing items successfully"""
         tracker = ItemTracker()
-        item = WorkItem(data=b"test")
+        item = WorkItem(data="test")
 
         await tracker.register_item(item)
         result = await tracker.complete_item(item.job_id, success=True)
@@ -61,7 +61,7 @@ class TestItemTracker:
     async def test_complete_item_with_error(self) -> None:
         """Test completing items with errors"""
         tracker = ItemTracker()
-        item = WorkItem(data=b"test")
+        item = WorkItem(data="test")
         error = ValueError("Test error")
 
         await tracker.register_item(item)
@@ -86,7 +86,7 @@ class TestItemTracker:
 
         tracker.add_completion_callback(callback)
 
-        item = WorkItem(data=b"test")
+        item = WorkItem(data="test")
         await tracker.register_item(item)
         await tracker.complete_item(item.job_id)
 
@@ -110,7 +110,7 @@ class TestItemTracker:
                 await tracker.update_item_stage(item.job_id, PipelineStage.PROCESSING)
 
         # Complete one item
-        completed_item = WorkItem(data=b"completed")
+        completed_item = WorkItem(data="completed")
         await tracker.register_item(completed_item)
         await tracker.complete_item(completed_item.job_id, success=True)
 
@@ -142,7 +142,7 @@ class TestItemTracker:
     async def test_nonexistent_job_id(self) -> None:
         """Test completing an item with a nonexistent job ID"""
         tracker = ItemTracker()
-        item = WorkItem(data=b"test")
+        item = WorkItem(data="test")
 
         with pytest.raises(RuntimeError):
             await tracker.complete_item(item.job_id)
