@@ -101,5 +101,3 @@ class CustomETLPipeline(ETLPipeline):
 ```
 
 Additinally there is an ExampleDockerfile which shows how to use Bergtalzugs base Docker image.
-
-# TODO: Add test for unknown job IDs (happens if refill queue incorrectly returns duplicate work items)
