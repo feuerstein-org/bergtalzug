@@ -1,0 +1,9 @@
+FROM bergtalzug-base:latest
+
+# Copy the test script
+COPY test.py /app/test.py
+
+ENV PYTHONUNBUFFERED=1
+
+# Run the test with unbuffered output
+CMD ["python", "/app/test.py"]
