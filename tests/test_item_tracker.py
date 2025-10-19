@@ -137,3 +137,12 @@ class TestItemTracker:
 
         active_items = await tracker.get_active_items()
         assert len(active_items) == 30
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_job_id(self) -> None:
+        """Test completing an item with a nonexistent job ID"""
+        tracker = ItemTracker()
+        item = WorkItem(data=b"test")
+
+        with pytest.raises(RuntimeError):
+            await tracker.complete_item(item.job_id)

@@ -118,30 +118,34 @@ class ItemTracker:
         self, job_id: str, success: bool = True, error: Exception | None = None
     ) -> PipelineResult | None:
         """Mark an item as completed"""
-        result = None
         callbacks_to_run = []
 
         async with self._lock:
-            if job_id in self._items:
-                item = self._items[job_id]
-                item.metadata.completed_at = datetime.now(timezone.utc)
-                item.metadata.add_stage_transition(PipelineStage.COMPLETED if success else PipelineStage.ERROR)
+            if job_id not in self._items:
+                # TODO: Maybe refactor the code to also check for correct IDs after each stage
+                # This check only applies for the refill_queue function currently
+                raise RuntimeError(
+                    f"Unknown job ID: {job_id} - this could be due to `refill_queue` items with duplicate job IDs"
+                )
 
-                result = PipelineResult(job_id=job_id, success=success, metadata=item.metadata, error=error)
+            item = self._items[job_id]
+            item.metadata.completed_at = datetime.now(timezone.utc)
+            item.metadata.add_stage_transition(PipelineStage.COMPLETED if success else PipelineStage.ERROR)
 
-                self._completed[job_id] = result
-                del self._items[job_id]
+            result = PipelineResult(job_id=job_id, success=success, metadata=item.metadata, error=error)
 
-                # Copy callbacks while still under lock
-                callbacks_to_run = self._callbacks.copy()
+            self._completed[job_id] = result
+            del self._items[job_id]
+
+            # Copy callbacks while still under lock
+            callbacks_to_run = self._callbacks.copy()
 
         # Run callbacks outside the lock
-        if result is not None:
-            for callback in callbacks_to_run:
-                try:
-                    callback(result)
-                except Exception as e:
-                    logging.error("Callback error: %s", e)
+        for callback in callbacks_to_run:
+            try:
+                callback(result)
+            except Exception as e:
+                logging.error("Callback error: %s", e)
 
         return result
 
