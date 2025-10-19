@@ -475,13 +475,12 @@ class ETLPipeline(ABC):
     async def _periodic_stats_reporter(self) -> None:
         """Periodically report pipeline statistics"""
         while True:
+            await asyncio.sleep(self.config.stats_interval_seconds)
             try:
                 if self.tracker:
                     await self.tracker.log_statistics(self.logger)
             except Exception as e:
                 self.logger.error("Error reporting stats: %s", e)
-
-            await asyncio.sleep(self.config.stats_interval_seconds)
 
     def add_completion_callback(self, callback: Callable[[PipelineResult], None]) -> None:
         """Add a callback to be notified when items complete"""
