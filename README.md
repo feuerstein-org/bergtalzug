@@ -17,11 +17,11 @@ As of now the stages are essentially very similar and you could write fetching l
 
 The pipeline is designed as follows: There are pools of workers where data is passed through. Data is passed in the form of `WorkItem` objects.
 
-    `fetch`    `process`    `store`
-    `fetch`    `process`    `store`
-    `fetch` -> `process` -> `store`
-    `fetch`    `process`    `store`
-    `fetch`    `process`    `store`
+    fetch      process      store
+    fetch      process      store
+    fetch  ->  process  ->  store
+    fetch      process      store
+    fetch      process      store
 
 Each job (a `WorkItem` object) goes through the whole pipeline before it's marked as "completed". To get jobs another function you need to overwite (`refill_queue`) is called.
 
