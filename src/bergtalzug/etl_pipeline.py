@@ -38,8 +38,6 @@ class PipelineStage(Enum):
     ERROR = "error"
 
 
-# TODO: Add additinal functionality to add metadata for some steps.
-# e.g. how many retries, error messages, processing stats etc.
 @dataclass
 class WorkItemMetadata:
     """Structured metadata for WorkItem lifecycle tracking"""
@@ -757,3 +755,9 @@ class ETLPipeline(ABC):
 
         # Shutdown executor
         return results
+
+
+# if __name__ == "__main__":
+#     print("ETL pipeline started")
+#     import time
+#     time.sleep(10000)
