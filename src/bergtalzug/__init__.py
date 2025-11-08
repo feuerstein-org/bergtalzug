@@ -24,7 +24,6 @@ from bergtalzug.etl_pipeline import (
     ETLPipelineConfig,
     WorkItem,
     WorkItemMetadata,
-    PipelineStage,
     PipelineResult,
     ItemTracker,
 )
@@ -34,7 +33,6 @@ __all__ = [
     "ETLPipelineConfig",
     "ItemTracker",
     "PipelineResult",
-    "PipelineStage",
     "WorkItem",
     "WorkItemMetadata",
 ]
