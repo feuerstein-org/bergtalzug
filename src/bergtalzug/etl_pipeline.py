@@ -1,21 +1,24 @@
 """
-ETL Pipeline Implementation
+Dynamic ETL Pipeline Implementation
 
-This module implements an ETL (Extract, Transform, Load) pipeline using asyncio and culsans for concurrency.
-By default processing is done via async (`process` function), however you can use the `sync_process` method
-for synchronous processing with threads. This will use the ThreadPoolExecutor instead.
+This module implements a flexible ETL pipeline with user-defined stages using asyncio and culsans.
+Users can configure any number of stages, each with custom concurrency models:
+- Async stages (native asyncio)
+- Sync stages with ThreadPoolExecutor
+- Sync stages with ProcessPoolExecutor
+- Sync stages with InterpreterPoolExecutor (Python 3.14+)
 
-As of now if `process` is defined the code will run in the same thread as async and
-if `sync_process` is defined it will run in a separate thread.
+The pipeline handles queueing, tracking, statistics, and lifecycle management automatically.
 """
 
 import asyncio
 import logging
+import inspect
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, InterpreterPoolExecutor
 from abc import ABC, abstractmethod
-from typing import Any, Annotated
-from collections.abc import Callable
+from typing import Any, Annotated, cast
+from collections.abc import Callable, Awaitable
 import culsans
 from pydantic import BaseModel, Field
 from enum import Enum
@@ -24,39 +27,46 @@ from uuid import uuid4
 import contextlib
 
 
-class PipelineStage(Enum):
-    """Enum for pipeline stages"""
-
-    CREATED = "created"
-    QUEUED_FETCH = "queued_fetch"
-    FETCHING = "fetching"
-    QUEUED_PROCESS = "queued_process"
-    PROCESSING = "processing"
-    QUEUED_STORE = "queued_store"
-    STORING = "storing"
-    COMPLETED = "completed"
-    ERROR = "error"
-
-
 @dataclass
 class WorkItemMetadata:
-    """Structured metadata for WorkItem lifecycle tracking"""
+    """Structured metadata for WorkItem lifecycle tracking with dynamic stages"""
 
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    stage: PipelineStage = PipelineStage.CREATED
-    fetch_started_at: datetime | None = None
-    fetch_completed_at: datetime | None = None
-    process_started_at: datetime | None = None
-    process_completed_at: datetime | None = None
-    store_started_at: datetime | None = None
-    store_completed_at: datetime | None = None
-    completed_at: datetime | None = None
+    current_stage: str = "created"
+    created: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed: datetime | None = None
     error_details: dict[str, Any] | None = None
     custom_metadata: dict[str, Any] = field(default_factory=lambda: {})
+    # Dynamic stage timing: {stage_name: {"queued": datetime, "started": datetime, "completed": datetime}}
+    stage_timings: dict[str, dict[str, datetime]] = field(default_factory=lambda: {})
 
-    def add_stage_transition(self, stage: PipelineStage) -> None:
-        """Record a stage transition with timestamp"""
-        self.stage = stage
+    def add_stage_transition(self, stage: str, transition_type: str = "started") -> None:
+        """
+        Record a stage transition with timestamp.
+
+        Args:
+            stage: Name of the stage
+            transition_type: Type of transition - "queued", "started", or "completed"
+
+        """
+        self.current_stage = stage
+        if stage not in self.stage_timings:
+            self.stage_timings[stage] = {}
+
+        timestamp_key = f"{transition_type}"
+        self.stage_timings[stage][timestamp_key] = datetime.now(timezone.utc)
+
+    def get_stage_duration(self, stage: str) -> float | None:
+        """Get the duration of a stage in seconds"""
+        if stage not in self.stage_timings:
+            return None
+
+        timings = self.stage_timings[stage]
+        started = timings.get("started")
+        completed = timings.get("completed")
+
+        if started and completed:
+            return (completed - started).total_seconds()
+        return None
 
 
 @dataclass
@@ -85,34 +95,49 @@ class PipelineResult:
     @property
     def total_duration(self) -> float | None:
         """Total time from creation to completion"""
-        if self.metadata.completed_at:
-            return (self.metadata.completed_at - self.metadata.created_at).total_seconds()
+        if self.metadata.completed:
+            return (self.metadata.completed - self.metadata.created).total_seconds()
         return None
 
 
 # TODO: Currently both, read and write operation acquire a lock - this might be a bottleneck
-# Potentially switch to a different approach like a queue, external database, Reader-writer locks etc.
+# Potentially switch to a different approach like a queue, Reader-writer locks etc.
 class ItemTracker:
-    """Tracks all items flowing through the pipeline"""
+    """Tracks all items flowing through the pipeline with dynamic stages"""
 
-    def __init__(self) -> None:
-        """Initialize the item tracker"""
+    def __init__(self, stage_names: list[str]) -> None:
+        """
+        Initialize the item tracker.
+
+        Args:
+            stage_names: List of stage names in the pipeline
+
+        """
         self._items: dict[str, WorkItem] = {}
         self._completed: dict[str, PipelineResult] = {}
         self._lock = asyncio.Lock()
         self._callbacks: list[Callable[[PipelineResult], None]] = []
+        self._stage_names = stage_names
 
     async def register_item(self, item: WorkItem) -> None:
         """Register a new item entering the pipeline"""
         async with self._lock:
             self._items[item.job_id] = item
-            item.metadata.add_stage_transition(PipelineStage.CREATED)
+            item.metadata.add_stage_transition("created")
 
-    async def update_item_stage(self, job_id: str, stage: PipelineStage) -> None:
-        """Update the stage of an item"""
+    async def update_item_stage(self, job_id: str, stage: str, transition_type: str = "started") -> None:
+        """
+        Update the stage of an item.
+
+        Args:
+            job_id: The job ID
+            stage: The stage name
+            transition_type: Type of transition - "queued", "started", or "completed"
+
+        """
         async with self._lock:
             if job_id in self._items:
-                self._items[job_id].metadata.add_stage_transition(stage)
+                self._items[job_id].metadata.add_stage_transition(stage, transition_type)
 
     async def complete_item(
         self, job_id: str, success: bool = True, error: Exception | None = None
@@ -129,8 +154,8 @@ class ItemTracker:
                 )
 
             item = self._items[job_id]
-            item.metadata.completed_at = datetime.now(timezone.utc)
-            item.metadata.add_stage_transition(PipelineStage.COMPLETED if success else PipelineStage.ERROR)
+            item.metadata.completed = datetime.now(timezone.utc)
+            item.metadata.current_stage = "completed" if success else "error"
 
             result = PipelineResult(job_id=job_id, success=success, metadata=item.metadata, error=error)
 
@@ -168,7 +193,7 @@ class ItemTracker:
         async with self._lock:
             active_stages: dict[str, int] = {}
             for item in self._items.values():
-                stage = item.metadata.stage.value
+                stage = item.metadata.current_stage
                 active_stages[stage] = active_stages.get(stage, 0) + 1
 
             completed_count = len(self._completed)
@@ -180,27 +205,16 @@ class ItemTracker:
                 if durations:
                     avg_duration = sum(durations) / len(durations)
 
-            # TODO: This is potentially expensive, consider caching or optimizing
+            # This is potentially expensive, consider caching or optimizing
             # Stage-specific average durations
-            stage_durations: dict[str, list[float]] = {"fetch": [], "process": [], "store": []}
+            stage_durations: dict[str, list[float]] = {stage: [] for stage in self._stage_names}
 
             for result in self._completed.values():
                 metadata = result.metadata
-
-                # Fetch stage duration
-                if metadata.fetch_started_at and metadata.fetch_completed_at:
-                    fetch_duration = (metadata.fetch_completed_at - metadata.fetch_started_at).total_seconds()
-                    stage_durations["fetch"].append(fetch_duration)
-
-                # Process stage duration
-                if metadata.process_started_at and metadata.process_completed_at:
-                    process_duration = (metadata.process_completed_at - metadata.process_started_at).total_seconds()
-                    stage_durations["process"].append(process_duration)
-
-                # Store stage duration
-                if metadata.store_started_at and metadata.store_completed_at:
-                    store_duration = (metadata.store_completed_at - metadata.store_started_at).total_seconds()
-                    stage_durations["store"].append(store_duration)
+                for stage in self._stage_names:
+                    duration = metadata.get_stage_duration(stage)
+                    if duration is not None:
+                        stage_durations[stage].append(duration)
 
             # Averages for each stage
             avg_stage_durations = {}
@@ -222,16 +236,23 @@ class ItemTracker:
     async def log_statistics(self, logger: logging.Logger) -> None:
         """Log pipeline statistics"""
         stats = await self.get_statistics()
+
+        # Build stage duration string
+        stage_durations_str = " | ".join(
+            [
+                f"Avg {stage} Duration: {stats.get(f'average_{stage}_duration_seconds', 0) or 0:.2f}s"
+                for stage in self._stage_names
+            ]
+        )
+
         logger.info(
-            "Pipeline Stats | Active: %d | Active items by stage: %s | Completed: %d | Success Rate: %.2f%% | Avg Duration: %.2fs | Avg Fetch Duration: %.2fs | Avg Process Duration: %.2fs | Avg Store Duration: %.2fs",
+            "Pipeline Stats | Active: %d | Active items by stage: %s | Completed: %d | Success Rate: %.2f%% | Avg Duration: %.2fs | %s",
             stats["active_items"],
             stats["active_by_stage"],
             stats["completed_items"],
             stats["success_rate"] * 100,
             stats["average_duration_seconds"] or 0,
-            stats["average_fetch_duration_seconds"] or 0,
-            stats["average_process_duration_seconds"] or 0,
-            stats["average_store_duration_seconds"] or 0,
+            stage_durations_str,
         )
 
 
@@ -239,22 +260,43 @@ PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 NonNegativeFloat = Annotated[float, Field(ge=0, strict=True)]
 
 
-# TODO: each workers should have an ID for identification/logging
-class ETLPipelineConfig(BaseModel):
+class ExecutionType(str, Enum):
+    """Execution types for pipeline stages"""
+
+    ASYNC = "async"
+    THREAD = "thread"
+    PROCESS = "process"
+    INTERPRETER = "interpreter"
+
+
+class StageConfig(BaseModel):
     """
-    Configuration model for ETL Pipeline with validation.
+    Configuration for a single pipeline stage.
 
     Args:
-        pipeline_name (str): Name of the pipeline for logging.
-        fetch_workers (PositiveInt): Number of concurrent fetch workers.
-        process_workers (PositiveInt): Number of processing workers.
-        store_workers (PositiveInt): Number of store workers.
-        fetch_queue_size (PositiveInt): Size of the fetch queue.
-        process_queue_size (PositiveInt): Size of the process queue.
-        store_queue_size (PositiveInt): Size of the store queue.
-        queue_refresh_rate (NonNegativeFloat): Interval in seconds to check and refill the fetch queue.
-        enable_tracking (bool): Whether to enable item tracking, will return PipelineResult on completion.
-        stats_interval_seconds (NonNegativeFloat): Interval in seconds to report pipeline statistics.
+        name: Unique name for the stage
+        execution_type: How to execute the stage (async/thread/process/interpreter)
+        workers: Number of concurrent workers for this stage
+        queue_size: Maximum size of the queue feeding this stage
+
+    """
+
+    name: str
+    execution_type: ExecutionType = ExecutionType.ASYNC
+    workers: PositiveInt = 5
+    queue_size: PositiveInt = 1000
+
+
+class ETLPipelineConfig(BaseModel):
+    """
+    Configuration model for dynamic ETL Pipeline with validation.
+
+    Args:
+        pipeline_name: Name of the pipeline for logging
+        stages: List of stage configurations defining the pipeline
+        queue_refresh_rate: Interval in seconds to check and refill the first queue
+        enable_tracking: Whether to enable item tracking, will return PipelineResult on completion
+        stats_interval_seconds: Interval in seconds to report pipeline statistics
 
     Raises:
         ValidationError: If any of the provided parameters are invalid
@@ -262,219 +304,140 @@ class ETLPipelineConfig(BaseModel):
     """
 
     pipeline_name: str = "etl_pipeline"
-    fetch_workers: PositiveInt = 10
-    process_workers: PositiveInt = 5
-    store_workers: PositiveInt = 10
-    fetch_queue_size: PositiveInt = 1000
-    process_queue_size: PositiveInt = 500
-    store_queue_size: PositiveInt = 1000
+    stages: list[StageConfig] = Field(min_length=1)
     queue_refresh_rate: NonNegativeFloat = 1.0  # seconds
     stats_interval_seconds: NonNegativeFloat = 10.0
     enable_tracking: bool = Field(default=True, strict=True)
 
-    # TODO: Potentially add some validation functions, e.g. too big/small queue etc.
+    def model_post_init(self, __context: Any) -> None:
+        """Validate pipeline configuration"""
+        # Check for duplicate stage names
+        stage_names = [stage.name for stage in self.stages]
+        if len(stage_names) != len(set(stage_names)):
+            raise ValueError("Stage names must be unique")
 
 
-# TODO: Make some properties public and modifiable, e.g. queue refresh rate or fetch workers
-# if dynamic worker size is available
+# Type alias for stage handlers
+StageHandler = Callable[[WorkItem], Awaitable[WorkItem]] | Callable[[str, Any], WorkItem]
+
+
 class ETLPipeline(ABC):
     """
-    Abstract base class for an ETL pipeline.
+    Abstract base class for a dynamic ETL pipeline.
 
-    Data will be passed through the stages of the pipeline as `WorkItem` objects.
-    All steps will be executed concurrently and asynchronously. Just override the abstract methods.
+    Data flows through user-defined stages as `WorkItem` objects.
+    Each stage can be either async or sync, with sync stages supporting
+    ThreadPoolExecutor, ProcessPoolExecutor, or InterpreterPoolExecutor.
 
-    The specific methods are:
-    refill_queue: which is called periodically to add items to the queue if it falls below a threshold.
-    fetch: which is called to fetch data.
-    process: async function which is called to process the fetched data.
-    sync_process: sync function that is called to process the fetched data in a thread.
-    store: which is called to store the processed data.
+    Users must:
+    1. Define a config with their desired stages (StageConfig)
+    2. Implement refill_queue() to provide work items
+    3. Provide handler functions for each stage via register_stage_handler()
 
-    Note: only process or sync_process can be defined, not both.
-    Only use sync_process if you have non-async compatible code.
-
-    Setting enable_tracking in the ETLPipelineConfig is required to track items as well as
-    get PipelineResult on completion of processing.
+    The pipeline handles all concurrency, queueing, tracking, and lifecycle management.
     """
 
-    def __init__(self, config: ETLPipelineConfig | None = None, **kwargs: Any) -> None:
+    def __init__(self, config: ETLPipelineConfig) -> None:
         """
-        Initialize the ETL pipeline with validated configuration.
+        Initialize the dynamic ETL pipeline.
 
         Args:
-            config: ETLPipelineConfig object with validated parameters
-            **kwargs: Individual parameters (will be validated and converted to config)
+            config: ETLPipelineConfig with stages and settings
 
         Raises:
-            ValidationError: If any of the provided parameters are invalid
+            ValueError: If configuration is invalid
 
         """
-        if config is None:
-            config = ETLPipelineConfig(**kwargs)
-        elif kwargs:
-            # If both config and kwargs are provided, raise an error to avoid confusion
-            raise ValueError("Cannot provide both 'config' and individual parameters via kwargs")
-
         self.config = config
         self.logger = logging.getLogger(f"etl.{config.pipeline_name}")
         self.pipeline_name = config.pipeline_name
-        self._fetch_workers = config.fetch_workers
-        self._process_workers = config.process_workers
-        self._store_workers = config.store_workers
-        self._fetch_queue_size = config.fetch_queue_size
-        self._process_queue_size = config.process_queue_size
-        self._store_queue_size = config.store_queue_size
-        self._process_executor = None
-        self._process_is_sync = self._check_process_is_sync()
-        if self._process_is_sync:
-            self._process_executor = ThreadPoolExecutor(max_workers=self._process_workers)
-
         self._queue_refresh_rate = config.queue_refresh_rate
 
-        # Initialize tracker
-        self.tracker = ItemTracker() if config.enable_tracking else None
+        # Stage setup
+        self._stages = config.stages
+        self._stage_handlers: dict[str, StageHandler] = {}
+        self._queues: dict[str, culsans.Queue[WorkItem | None]] = {}
+        self._executors: dict[str, ThreadPoolExecutor | ProcessPoolExecutor | InterpreterPoolExecutor] = {}
+
+        # Initialize tracker with stage names
+        stage_names = [stage.name for stage in self._stages]
+        self.tracker = ItemTracker(stage_names) if config.enable_tracking else None
+
         # Statistics task
         self._stats_task: asyncio.Task[None] | None = None
 
-    def _check_process_is_sync(self) -> bool:
-        """Validates that exactly one of process or sync_process is implemented."""
-        # Check which methods are implemented
-        has_async = "process" in self.__class__.__dict__
-        has_sync = "sync_process" in self.__class__.__dict__
+        # Pipeline lifecycle tracking
+        self._running = False
+        self._queue_manager_task: asyncio.Task[None] | None = None
+        self._worker_tasks: list[list[asyncio.Task[None]]] = []
 
-        if has_sync and has_async:
-            raise TypeError(f"Class {self.__class__.__name__} cannot implement both process and sync_process")
-        if not has_sync and not has_async:
-            raise TypeError(f"Class {self.__class__.__name__} must implement either process or sync_process")
+    def register_stage_handler(self, stage_name: str, handler: StageHandler) -> None:
+        """
+        Register a handler function for a stage.
 
-        return has_sync
+        Args:
+            stage_name: Name of the stage (must match a StageConfig name)
+            handler: The function to execute for this stage
+
+        Raises:
+            ValueError: If stage_name is not in the configured stages
+
+        """
+        stage_config = next((s for s in self._stages if s.name == stage_name), None)
+        if stage_config is None:
+            raise ValueError(f"Stage '{stage_name}' not found in pipeline configuration")
+
+        # Validate handler matches stage configuration
+        is_handler_async = inspect.iscoroutinefunction(handler)
+
+        if stage_config.execution_type == ExecutionType.ASYNC and not is_handler_async:
+            raise TypeError(f"Stage '{stage_name}' is configured with execution_type=ASYNC but handler is sync")
+        if stage_config.execution_type != ExecutionType.ASYNC and is_handler_async:
+            raise TypeError(
+                f"Stage '{stage_name}' is configured with execution_type={stage_config.execution_type.value} "
+                f"but handler is async"
+            )
+
+        self._stage_handlers[stage_name] = handler
+        self.logger.debug("Registered handler for stage '%s'", stage_name)
 
     @abstractmethod
     async def refill_queue(self, count: int) -> list[WorkItem]:
         """
-        Abstract method that gets called periodically to add items to the queue if falls below a threshold.
+        Periodically called to add items to the first stage queue.
 
-        A list of `count` WorkItems should be returned which will be passed to the fetch function one by one.
-        e.g. if count is 10, then 10 items should be returned.
-        If an Empty list is returned this signifies that the ETL job is finished.
+        Args:
+            count: Number of items requested
+
+        Returns:
+            List of WorkItems to add to pipeline. Empty list signals completion.
+
         """
         pass
-
-    @abstractmethod
-    async def fetch(self, item: WorkItem) -> WorkItem:
-        """
-        Abstract method that gets called when an item from the queue needs to be fetched.
-
-        After the item is fetched it should be simply returned as a WorkItem.
-        """
-        pass
-
-    async def process(self, item: WorkItem) -> WorkItem:
-        """
-        Abstract method that gets called when an item was passed from the fetch method.
-
-        Note that this method is async.
-        Use the `sync_process` method if you have non-async workload.
-        This will run the code in a separate thread.
-        Only one of the two can be defined.
-
-        Once processing is done the item should be returned as a WorkItem.
-        """
-        raise NotImplementedError(
-            "The async process method should be implemented in a subclass."
-            "Either 'process' or 'sync_process' must be implemented, but not both."
-        )
-
-    # TODO: Add a way to switch between ThreadPoolExecutor and ProcessPoolExecutor
-    # This is hard because passing the function to the ProcessPoolExecutor requires serialization
-    # of the entire class unless we create a static method just for this.
-    # Serializing the whole class is very inefficient, even the new InterpreterPoolExecutor
-    # requires this type of serialiazation which is not ideal.
-    # With the static method approach, this would mean we would have,
-    # `process`, `sync_process` and `static_sync_process` functions.
-    # Will need to see if there is a better way. Also at some stage we want to have a way
-    # to "build the pipeline" in any way we want, e.g. no hardcoded stages.
-    # It's best to add this feature once dynamic stages are being implemented.
-    def sync_process(self, item: WorkItem) -> WorkItem:
-        """
-        Abstract method that gets called when an item was passed from the fetch method.
-
-        Note that this method is a sync method for multithreading workloads.
-        This method should only be used if execution is needed to be done in a separate thread.
-
-        If asyncio can be used, use the `process` method instead.
-        Only one of the two can be defined.
-
-        Once processing is done the item should be returned as a WorkItem.
-        """
-        raise NotImplementedError(
-            "The sync process method should be implemented in a subclass."
-            "Either 'process' or 'sync_process' must be implemented, but not both."
-        )
-
-    @abstractmethod
-    async def store(self, item: WorkItem) -> None:
-        """
-        Abstract method that gets called when an item was processed.
-
-        This method should handle the storage of the processed data.
-        It is expected to be asynchronous, e.g., storeing to S3.
-        """
-        pass
-
-    @property
-    def fetch_workers(self) -> int:
-        """Number of fetch workers"""
-        return self._fetch_workers
-
-    @property
-    def process_workers(self) -> int:
-        """Number of process workers (async or sync)"""
-        return self._process_workers
-
-    @property
-    def store_workers(self) -> int:
-        """Number of store workers"""
-        return self._store_workers
-
-    @property
-    def fetch_queue_size(self) -> int:
-        """Size of the fetch queue"""
-        return self._fetch_queue_size
-
-    @property
-    def process_queue_size(self) -> int:
-        """Size of the process queue"""
-        return self._process_queue_size
-
-    @property
-    def store_queue_size(self) -> int:
-        """Size of the store queue"""
-        return self._store_queue_size
-
-    @property
-    def process_is_sync(self) -> bool:
-        """Whether the process stage is synchronous."""
-        return self._process_is_sync
-
-    @property
-    def queue_refresh_rate(self) -> float:
-        """Rate at which the queue is refreshed."""
-        return self._queue_refresh_rate
 
     async def _setup_queues(self) -> None:
-        """
-        Initialize queues.
+        """Initialize queues for all stages"""
+        for stage in self._stages:
+            self._queues[stage.name] = culsans.Queue[WorkItem | None](maxsize=stage.queue_size)
+            self.logger.debug("Created queue for stage '%s' with size %d", stage.name, stage.queue_size)
 
-        This method sets up the queues used in the ETL pipeline.
-        """
-        # Job queue for initial distribution
-        self._fetch_queue = culsans.Queue[WorkItem | None](maxsize=self._fetch_queue_size)
+    async def _setup_executors(self) -> None:
+        """Initialize executors for sync stages"""
+        for stage in self._stages:
+            if stage.execution_type == ExecutionType.THREAD:
+                self._executors[stage.name] = ThreadPoolExecutor(max_workers=stage.workers)
+            elif stage.execution_type == ExecutionType.PROCESS:
+                self._executors[stage.name] = ProcessPoolExecutor(max_workers=stage.workers)
+            elif stage.execution_type == ExecutionType.INTERPRETER:
+                self._executors[stage.name] = InterpreterPoolExecutor(max_workers=stage.workers)
 
-        # culsans queues provide both async and sync interfaces
-        self._process_queue = culsans.Queue[WorkItem | None](maxsize=self._process_queue_size)
-        self._store_queue = culsans.Queue[WorkItem | None](maxsize=self._store_queue_size)
+            if stage.execution_type != ExecutionType.ASYNC:
+                self.logger.debug(
+                    "Created %s executor for stage '%s' with %d workers",
+                    stage.execution_type.value,
+                    stage.name,
+                    stage.workers,
+                )
 
     async def _periodic_stats_reporter(self) -> None:
         """Periodically report pipeline statistics"""
@@ -497,7 +460,6 @@ class ETLPipeline(ABC):
         """Get currently active items in the pipeline"""
         if self.tracker:
             return await self.tracker.get_active_items()
-
         self.logger.warning("Item tracking is disabled, cannot get active items")
         return []
 
@@ -505,24 +467,29 @@ class ETLPipeline(ABC):
         """Get current pipeline statistics"""
         if self.tracker:
             return await self.tracker.get_statistics()
-
         self.logger.warning("Item tracking is disabled, cannot get statistics")
         return {}
 
     async def _periodic_queue_manager(self) -> None:
-        """Periodically check queue size and add items if below 50% capacity."""
+        """Periodically check the first queue size and add items if below 50% capacity"""
+        first_stage = self._stages[0]
+        first_queue = self._queues[first_stage.name]
+        threshold = first_stage.queue_size / 2  # 50% threshold
+
         while True:
-            current_size = self._fetch_queue.qsize()
-            threshold = self._fetch_queue_size / 2  # 50% threshold, TODO: make configurable
+            current_size = first_queue.qsize()
 
             if current_size < threshold:
                 self.logger.debug(
-                    "Fetch queue size below threshold (%s/%s), adding items", current_size, self._fetch_queue_size
+                    "First queue '%s' size below threshold (%s/%s), adding items",
+                    first_stage.name,
+                    current_size,
+                    first_stage.queue_size,
                 )
-                target_size = int(self._fetch_queue_size * 0.9)
+                target_size = int(first_stage.queue_size * 0.9)
                 available_space = target_size - current_size
-                # Request 90% of available space as safety buffer, later might need to add buffer due to overflow risk
-                count = max(1, available_space)  # even if available space is 0, we want to refill at least one item
+                count = max(1, available_space)
+
                 try:
                     items = await self.refill_queue(count)
 
@@ -530,237 +497,285 @@ class ETLPipeline(ABC):
                         self.logger.info("No more items available, initiating shutdown")
                         break
 
-                    # Add all items to the fetch queue
+                    # Add all items to the first queue
                     for item in items:
                         if self.tracker:
                             await self.tracker.register_item(item)
-                            await self.tracker.update_item_stage(item.job_id, PipelineStage.QUEUED_FETCH)
-                        await self._fetch_queue.async_put(item)
+                            await self.tracker.update_item_stage(item.job_id, first_stage.name, "queued")
+                        await first_queue.async_put(item)
 
-                    self.logger.debug("Added %s items to fetch queue", len(items))
+                    self.logger.debug("Added %s items to first queue '%s'", len(items), first_stage.name)
 
                 except Exception as e:
                     self.logger.error("Error in refill_queue: %s", e)
                     # Continue running - don't break the pipeline for this error
-            # Check every second
+
             await asyncio.sleep(self._queue_refresh_rate)
 
-    async def _fetch_worker(self) -> None:
+    async def _create_stage_worker(self, stage_idx: int) -> None:  # noqa C901
         """
-        Async fetching worker.
+        Generic worker for any stage.
 
-        Gets fetch jobs from the fetch queue and gets data asynchronously.
+        Args:
+            stage_idx: Index of the stage in the stages list
+
         """
+        stage = self._stages[stage_idx]
+        stage_name = stage.name
+        input_queue = self._queues[stage_name]
+
+        # Determine output queue (next stage's queue or None for last stage)
+        if stage_idx + 1 < len(self._stages):
+            next_stage_name = self._stages[stage_idx + 1].name
+            output_queue = self._queues[next_stage_name]
+        else:
+            output_queue = None
+            next_stage_name = None
+
+        handler: StageHandler = self._stage_handlers[stage_name]
+        executor = self._executors.get(stage_name)
+        loop = asyncio.get_running_loop()
+
         while True:
-            work_item = await self._fetch_queue.async_get()
+            work_item: WorkItem | None = await input_queue.async_get()
             if work_item is None:  # Poison pill
-                self.logger.info("Fetch worker received poison pill, shutting down")
+                self.logger.info("Stage '%s' worker received poison pill, shutting down", stage_name)
                 break
 
             try:
                 if self.tracker:
-                    await self.tracker.update_item_stage(work_item.job_id, PipelineStage.FETCHING)
-                work_item.metadata.fetch_started_at = datetime.now(timezone.utc)
-                self.logger.debug(
-                    "Received fetch job from queue, calling abstract fetch function for job %s", work_item.job_id
-                )
+                    await self.tracker.update_item_stage(work_item.job_id, stage_name, "started")
 
-                fetched_item = await self.fetch(work_item)
-
-                fetched_item.metadata.fetch_completed_at = datetime.now(timezone.utc)
-                if self.tracker:
-                    await self.tracker.update_item_stage(fetched_item.job_id, PipelineStage.QUEUED_PROCESS)
-                await self._process_queue.async_put(fetched_item)
-            except Exception as e:
-                self.logger.error("Fetch error for job %s: %s", work_item.job_id, e)
-                if self.tracker:
-                    await self.tracker.complete_item(work_item.job_id, success=False, error=e)
-                # TODO: Add retry logic (DLQ) or error handling or dead-letter queue + log
-            finally:
-                # For now still need to mark as done even on failure to prevent deadlock
-                # This WILL loose items in case of error!!
-                self._fetch_queue.task_done()
-
-    async def _process_worker(self) -> None:
-        """
-        Async process worker.
-
-        Gets process jobs from the process queue and processes them.
-        """
-        while True:
-            work_item = await self._process_queue.async_get()
-            if work_item is None:  # Poison pill
-                self.logger.info("Process worker received poison pill, shutting down")
-                break
-
-            try:
-                if self.tracker:
-                    await self.tracker.update_item_stage(work_item.job_id, PipelineStage.PROCESSING)
-                work_item.metadata.process_started_at = datetime.now(timezone.utc)
-                self.logger.debug(
-                    "Received process job from queue, calling abstract process function for job %s", work_item.job_id
-                )
-
-                # pick execution strategy
-                if not self._process_is_sync:
-                    processed_item = await self.process(work_item)
+                # Execute the handler
+                processed_item: WorkItem
+                if stage.execution_type == ExecutionType.ASYNC:
+                    # Async handler
+                    processed_item = cast(WorkItem, await handler(work_item))  # type: ignore
                 else:
-                    loop = asyncio.get_running_loop()
-                    processed_item = await loop.run_in_executor(self._process_executor, self.sync_process, work_item)
+                    # Sync handler - run in executor
+                    # Potentially, if needed later, pass in metadata as a dict or something similar
+                    # since we can't pass as a class
+                    data: Any = await loop.run_in_executor(executor, handler, work_item.job_id, work_item.data)  # type: ignore
+                    work_item.data = data
+                    processed_item = work_item
 
-                processed_item.metadata.process_completed_at = datetime.now(timezone.utc)
                 if self.tracker:
-                    await self.tracker.update_item_stage(processed_item.job_id, PipelineStage.QUEUED_STORE)
-                await self._store_queue.async_put(processed_item)
+                    await self.tracker.update_item_stage(work_item.job_id, stage_name, "completed")
+
+                # Pass to next stage or complete
+                if output_queue is not None:
+                    next_stage_name = self._stages[stage_idx + 1].name
+                    if self.tracker:
+                        await self.tracker.update_item_stage(processed_item.job_id, next_stage_name, "queued")
+                    await output_queue.async_put(processed_item)
+                elif self.tracker:
+                    # Last stage - mark as completed
+                    await self.tracker.complete_item(work_item.job_id, success=True)
+
             except Exception as e:
-                self.logger.error("Process error for job %s: %s", work_item.job_id, e)
+                self.logger.error("Error in stage '%s' for job %s: %s", stage_name, work_item.job_id, e)
                 if self.tracker:
                     await self.tracker.complete_item(work_item.job_id, success=False, error=e)
-                # TODO: Add retry logic (DLQ) or error handling or dead-letter queue + log
+
             finally:
-                # For now still need to mark as done even on failure to prevent deadlock
-                # This WILL loose items in case of error!!
-                self._process_queue.task_done()
-        return
+                input_queue.task_done()
 
-    async def _store_worker(self) -> None:
+    def is_running(self) -> bool:
         """
-        Async storing worker.
+        Check if the pipeline is currently running.
 
-        Gets store jobs from the store queue and stores data asynchronously.
+        Returns:
+            True if pipeline is active, False otherwise
+
         """
-        while True:
-            work_item = await self._store_queue.async_get()
-            if work_item is None:  # Poison pill
-                self.logger.info("Store worker received poison pill, shutting down")
-                break
+        return self._running
 
-            try:
-                if self.tracker:
-                    await self.tracker.update_item_stage(work_item.job_id, PipelineStage.STORING)
-                work_item.metadata.store_started_at = datetime.now(timezone.utc)
-                self.logger.debug(
-                    "Received store job from queue, calling abstract store function for job %s", work_item.job_id
+    async def stop(self) -> None:
+        """
+        Gracefully stop the pipeline.
+
+        This method cancels the queue manager task and initiates shutdown.
+        Workers will finish processing current items before shutting down.
+
+        Note: After calling stop(), you should still call wait() to ensure
+        all resources are properly cleaned up.
+        """
+        if not self._running:
+            self.logger.warning("Pipeline is not running, nothing to stop")
+            return
+
+        self.logger.info("Stopping pipeline: %s", self.pipeline_name)
+
+        if self._queue_manager_task and not self._queue_manager_task.done():
+            self._queue_manager_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._queue_manager_task
+
+        self.logger.info("Pipeline stop initiated. Call wait() to complete shutdown.")
+
+    async def start(self) -> None:
+        """
+        Start the ETL pipeline without blocking.
+
+        This method initializes queues, executors, and workers, then returns immediately.
+        Use `is_running()` to check status and `wait()` to wait for completion.
+
+        Example:
+            ```python
+            await pipeline.start()
+
+            # Monitor while running
+            while pipeline.is_running():
+                stats = await pipeline.get_pipeline_stats()
+                print(f"Active: {stats['active_items']}")
+                await asyncio.sleep(1)
+
+            # Wait for completion
+            results = await pipeline.wait()
+            ```
+
+        Raises:
+            RuntimeError: If handlers are not registered
+
+        """
+        if self._running:
+            self.logger.warning(
+                "Pipeline is already running. Use stop() method to stop the pipeline before starting again."
+            )
+            return
+
+        # Validate all stages have handlers
+        for stage in self._stages:
+            if stage.name not in self._stage_handlers:
+                raise RuntimeError(
+                    f"No handler registered for stage '{stage.name}'. Call register_stage_handler() first."
                 )
 
-                await self.store(work_item)
+        self.logger.info("Starting ETL pipeline: %s", self.pipeline_name)
+        self._running = True
 
-                work_item.metadata.store_completed_at = datetime.now(timezone.utc)
-                if self.tracker:
-                    # Mark as completed
-                    await self.tracker.complete_item(work_item.job_id, success=True)
-            except Exception as e:
-                self.logger.error("Storing error for job %s: %s", work_item.job_id, e)
-                if self.tracker:
-                    await self.tracker.complete_item(work_item.job_id, success=False, error=e)
-                # TODO: Add retry logic or error handling or dead-letter queue + log
-            finally:
-                # For now still need to mark as done even on failure to prevent deadlock
-                # This WILL loose items in case of error!!
-                self._store_queue.task_done()
-
-    # NOTE: Potentially allow to pass initial jobs to the pipeline
-    # Also might be worth adding a setup abstract method to initialize the pipeline
-    async def run(self) -> list[PipelineResult]:
-        """
-        Start the ETL pipeline.
-
-        This method sets up the queues, starts the workers, and manages the lifecycle of the ETL process.
-        """
-        self.logger.info("Initializing ETL pipeline: %s", self.pipeline_name)
-
-        # Setup queues
+        # Setup queues and executors
         await self._setup_queues()
+        await self._setup_executors()
+
         # Start periodic queue manager
-        queue_manager_task = asyncio.create_task(self._periodic_queue_manager())
+        self._queue_manager_task = asyncio.create_task(self._periodic_queue_manager())
 
         # Start statistics reporter if enabled
         if self.config.enable_tracking and self.config.stats_interval_seconds > 0:
             self._stats_task = asyncio.create_task(self._periodic_stats_reporter())
 
-        # Start download workers
-        fetch_tasks: list[asyncio.Task[None]] = []
-        for _ in range(self._fetch_workers):
-            task = asyncio.create_task(self._fetch_worker())
-            fetch_tasks.append(task)
+        # Start workers for all stages
+        self._worker_tasks = []
 
-        # Start process workers
-        process_tasks: list[asyncio.Task[None]] = []
-        for _ in range(self._process_workers):
-            task = asyncio.create_task(self._process_worker())
-            process_tasks.append(task)
+        for idx, stage in enumerate(self._stages):
+            stage_tasks: list[asyncio.Task[None]] = []
+            for _ in range(stage.workers):
+                task = asyncio.create_task(self._create_stage_worker(idx))
+                stage_tasks.append(task)
+            self._worker_tasks.append(stage_tasks)
+            self.logger.info(
+                "Started %d workers for stage '%s' (queue size: %d)", stage.workers, stage.name, stage.queue_size
+            )
 
-        # Start store workers
-        store_tasks: list[asyncio.Task[None]] = []
-        for _ in range(self._store_workers):
-            task = asyncio.create_task(self._store_worker())
-            store_tasks.append(task)
+        self.logger.info("Pipeline started successfully")
 
-        self.logger.info(
-            "ETL pipeline %s started | fetch_workers: %s (queue: %s) "
-            "| process_workers: %s (queue: %s) | store_workers: %s (queue: %s)",
-            self.pipeline_name,
-            self._fetch_workers,
-            self._fetch_queue_size,
-            self._process_workers,
-            self._process_queue_size,
-            self._store_workers,
-            self._store_queue_size,
-        )
+    async def wait(self) -> list[PipelineResult]:
+        """
+        Wait for the pipeline to complete and return results.
 
-        # Wait for the queue manager to signal completion
-        await queue_manager_task
+        This method blocks until all items are processed and workers shut down.
+        Must be called after `start()`. Can also be called after `stop()` to
+        ensure proper cleanup.
 
-        self.logger.info("Waiting for all jobs to complete")
+        Returns:
+            List of PipelineResults if tracking is enabled, empty list otherwise
 
-        # Sequential shutdown
-        await self._fetch_queue.async_join()
-        self.logger.info("All fetch jobs completed, shutting down fetch workers")
-        for _ in range(self._fetch_workers):
-            await self._fetch_queue.async_put(None)
+        Raises:
+            RuntimeError: If pipeline is not running
 
-        await self._process_queue.async_join()
-        self.logger.info("All process jobs completed, shutting down process workers")
-        for _ in range(self._process_workers):
-            await self._process_queue.async_put(None)
+        """
+        if not self._running:
+            raise RuntimeError("Pipeline is not running. Call start() first.")
 
-        await self._store_queue.async_join()
-        self.logger.info("All store jobs completed, shutting down store workers")
-        for _ in range(self._store_workers):
-            await self._store_queue.async_put(None)
+        if self._queue_manager_task is None:
+            raise RuntimeError("Pipeline not properly initialized")
 
-        # Wait for workers to finish
-        await asyncio.gather(*fetch_tasks)
-        await asyncio.gather(*process_tasks)
-        await asyncio.gather(*store_tasks)
+        try:
+            # Wait for the queue manager to signal completion
+            await self._queue_manager_task
 
-        # Stop stats reporter
-        if self._stats_task:
-            self._stats_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._stats_task
+            self.logger.info("Waiting for all jobs to complete")
 
-        # Close queues, TODO: Is this needed?
-        self._fetch_queue.close()
-        self._process_queue.close()
-        self._store_queue.close()
-        await self._fetch_queue.wait_closed()
-        await self._process_queue.wait_closed()
-        await self._store_queue.wait_closed()
+            # Sequential shutdown - join and poison pill each queue
+            for idx, stage in enumerate(self._stages):
+                queue = self._queues[stage.name]
+                await queue.async_join()
+                self.logger.info("All jobs for stage '%s' completed, shutting down workers", stage.name)
 
-        # Get final results
-        results = []
-        if self.tracker:
-            results = await self.tracker.get_completed_results()
-            await self.tracker.log_statistics(self.logger)
-        else:
-            self.logger.info("ETL pipeline %s completed", self.pipeline_name)
+                # Send poison pills
+                for _ in range(stage.workers):
+                    await queue.async_put(None)
 
-        # Shutdown executor
-        return results
+                # Wait for this stage's workers to finish
+                await asyncio.gather(*self._worker_tasks[idx])
 
+            # Stop stats reporter
+            if self._stats_task:
+                self._stats_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._stats_task
 
-# if __name__ == "__main__":
-#     print("ETL pipeline started")
-#     import time
-#     time.sleep(10000)
+            # TODO: Is this necessary?
+            # Close all queues
+            for stage in self._stages:
+                queue = self._queues[stage.name]
+                queue.close()
+                await queue.wait_closed()
+
+            # Shutdown executors
+            for executor in self._executors.values():
+                executor.shutdown(wait=True)
+
+            # Get final results
+            results = []
+            if self.tracker:
+                results = await self.tracker.get_completed_results()
+                await self.tracker.log_statistics(self.logger)
+            else:
+                self.logger.info("ETL pipeline %s completed", self.pipeline_name)
+
+            return results
+
+        finally:
+            self._running = False
+            self._queue_manager_task = None
+            self._worker_tasks = []
+
+    async def run(self) -> list[PipelineResult]:
+        """
+        Start the ETL pipeline and block until completion.
+
+        This is a convenience method that calls `start()` followed by `wait()`.
+        For more control over pipeline lifecycle, use `start()`, `is_running()`, and `wait()` separately.
+
+        Example with monitoring:
+            ```python
+            # Option 1: Simple blocking run
+            results = await pipeline.run()
+
+            # Option 2: Non-blocking with monitoring
+            await pipeline.start()
+            while pipeline.is_running():
+                stats = await pipeline.get_pipeline_stats()
+                print(f"Active: {stats['active_items']}")
+                await asyncio.sleep(1)
+            results = await pipeline.wait()
+            ```
+
+        Returns:
+            List of PipelineResults if tracking is enabled, empty list otherwise
+
+        """
+        await self.start()
+        return await self.wait()
