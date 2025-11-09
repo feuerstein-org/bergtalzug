@@ -318,7 +318,9 @@ class ETLPipelineConfig(BaseModel):
 
 
 # Type alias for stage handlers
-StageHandler = Callable[[WorkItem], Awaitable[WorkItem]] | Callable[[str, Any], WorkItem]
+StageHandler = (
+    Callable[[WorkItem], Awaitable[WorkItem]] | Callable[[WorkItem], WorkItem] | Callable[[str, Any], WorkItem]
+)
 
 
 class ETLPipeline:
