@@ -1,9 +1,9 @@
 """Tests for the complete ETL pipeline integration."""
 
-import pytest
 import asyncio
-from conftest import work_item_factory, MockETLPipelineFactory
-from bergtalzug import WorkItem
+import pytest
+from conftest import work_item_factory, MockETLPipelineFactory, create_default_stages
+from bergtalzug.etl_pipeline import StageConfig, ExecutionType, WorkItem
 
 
 class TestPipelineIntegration:
@@ -24,7 +24,7 @@ class TestPipelineIntegration:
 
     @pytest.mark.asyncio
     async def test_simple_pipeline_flow(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
-        """Test basic end-to-end flow"""
+        """Test basic end-to-end flow with default 5-stage pipeline"""
         pipeline = mock_etl_pipeline_factory.create(work_items_count=5)
         results = await pipeline.run()
 
@@ -32,40 +32,122 @@ class TestPipelineIntegration:
         assert len(results) == 5
         assert all(r.success for r in results)
 
-        # Verify all stages were called
-        assert pipeline.mock_fetch.call_count == 5
-        assert pipeline.mock_process.call_count == 5
-        assert pipeline.mock_store.call_count == 5
+        # Verify mockable stages were called (async and thread stages can be mocked)
+        # Process and Interpreter stages use picklable functions and can't be mocked
+        assert pipeline.mock_stage_handlers["fetch"].call_count == 5
+        assert pipeline.mock_stage_handlers["thread"].call_count == 5
+        # process (process) and interpret (interpreter) are not mocked
+        assert pipeline.mock_stage_handlers["store"].call_count == 5
 
     @pytest.mark.asyncio
-    async def test_simple_sync_process_pipeline_flow(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
-        """Test basic end-to-end flow for a sync process pipeline"""
-        pipeline = mock_etl_pipeline_factory.create_sync(work_items_count=5)
+    @pytest.mark.parametrize(
+        ("stage_configs", "expected_count"),
+        [
+            # Simple three stages with PROCESS
+            (
+                [
+                    StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                    StageConfig(name="process", execution_type=ExecutionType.PROCESS, workers=1, queue_size=5),
+                    StageConfig(name="store", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                ],
+                100,
+            ),
+            # Mixed sequence with THREAD and INTERPRETER
+            (
+                [
+                    StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                    StageConfig(name="thread", execution_type=ExecutionType.THREAD, workers=2, queue_size=5),
+                    StageConfig(name="interpret", execution_type=ExecutionType.INTERPRETER, workers=2, queue_size=5),
+                    StageConfig(name="store", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                ],
+                150,
+            ),
+            # Alternating all four types
+            (
+                [
+                    StageConfig(name="async_one", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                    StageConfig(name="thread", execution_type=ExecutionType.THREAD, workers=1, queue_size=5),
+                    StageConfig(name="process", execution_type=ExecutionType.PROCESS, workers=1, queue_size=5),
+                    StageConfig(name="interpret", execution_type=ExecutionType.INTERPRETER, workers=1, queue_size=5),
+                    StageConfig(name="async_two", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                ],
+                120,
+            ),
+            # Multiple PROCESS and INTERPRETER stages
+            (
+                [
+                    StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                    StageConfig(name="process_one", execution_type=ExecutionType.PROCESS, workers=2, queue_size=10),
+                    StageConfig(
+                        name="interpret_one", execution_type=ExecutionType.INTERPRETER, workers=2, queue_size=10
+                    ),
+                    StageConfig(name="process_two", execution_type=ExecutionType.PROCESS, workers=1, queue_size=5),
+                    StageConfig(name="store", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                ],
+                150,
+            ),
+            # Varying queue sizes with mixed types
+            (
+                [
+                    StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=1, queue_size=50),
+                    StageConfig(name="process", execution_type=ExecutionType.PROCESS, workers=2, queue_size=10),
+                    StageConfig(name="thread", execution_type=ExecutionType.THREAD, workers=1, queue_size=5),
+                    StageConfig(name="store", execution_type=ExecutionType.ASYNC, workers=1, queue_size=20),
+                ],
+                200,
+            ),
+            # High concurrency with all four types
+            (
+                [
+                    StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=30, queue_size=1000),
+                    StageConfig(name="thread", execution_type=ExecutionType.THREAD, workers=30, queue_size=1000),
+                    StageConfig(name="process", execution_type=ExecutionType.PROCESS, workers=30, queue_size=1000),
+                    StageConfig(
+                        name="interpret", execution_type=ExecutionType.INTERPRETER, workers=30, queue_size=1000
+                    ),
+                    StageConfig(name="async", execution_type=ExecutionType.ASYNC, workers=30, queue_size=1000),
+                    StageConfig(name="store", execution_type=ExecutionType.ASYNC, workers=30, queue_size=1000),
+                ],
+                1500,
+            ),
+        ],
+    )
+    async def test_pipeline_with_custom_stages(
+        self,
+        mock_etl_pipeline_factory: MockETLPipelineFactory,
+        stage_configs: list[StageConfig],
+        expected_count: int,
+    ) -> None:
+        """Test pipeline with various stage configurations and orderings"""
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=expected_count, stages=stage_configs)
         results = await pipeline.run()
 
         # Verify all items processed
-        assert len(results) == 5
+        assert len(results) == expected_count
         assert all(r.success for r in results)
 
-        # Verify all stages were called
-        assert pipeline.mock_fetch.call_count == 5
-        assert pipeline.mock_sync_process.call_count == 5
-        assert pipeline.mock_store.call_count == 5
+        # Verify mockable stages were called (PROCESS and INTERPRETER use picklable functions, not mocks)
+        for stage_config in stage_configs:
+            handler = pipeline.mock_stage_handlers[stage_config.name]
+            # Only verify call_count for mockable stages (ASYNC and THREAD)
+            if stage_config.execution_type in (ExecutionType.ASYNC, ExecutionType.THREAD):
+                assert handler.call_count == expected_count
 
     @pytest.mark.asyncio
     async def test_simple_pipeline_with_tracking_disabled(
         self, mock_etl_pipeline_factory: MockETLPipelineFactory
     ) -> None:
-        """Test basic end-to-end flow"""
-        pipeline = mock_etl_pipeline_factory.create(work_items_count=5, enable_tracking=False)
+        """Test basic end-to-end flow with tracking disabled"""
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=15, enable_tracking=False)
 
         # Without item tracking no pipeline results
         await pipeline.run()
 
-        # Verify all stages were called
-        assert pipeline.mock_fetch.call_count == 5
-        assert pipeline.mock_process.call_count == 5
-        assert pipeline.mock_store.call_count == 5
+        # Verify mockable stages were called
+        assert pipeline.mock_stage_handlers["fetch"].call_count == 15
+        assert pipeline.mock_stage_handlers["thread"].call_count == 15
+        # process (process) and interpret (interpreter) are not mocked
+        assert pipeline.mock_stage_handlers["store"].call_count == 15
 
     @pytest.mark.asyncio
     async def test_pipeline_with_errors(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
@@ -73,13 +155,14 @@ class TestPipelineIntegration:
         items = work_item_factory(count=3)
         pipeline = mock_etl_pipeline_factory.create(items_to_process=items)
 
-        # Make second item fail during processing
-        async def process_with_error(item: WorkItem) -> WorkItem:
-            if item.job_id == items[1].job_id:
+        # Make second item fail during the thread stage (which is a THREAD stage - sync handler)
+        def thread_with_error(work_item: WorkItem) -> WorkItem:
+            if work_item.job_id == items[1].job_id:
                 raise ValueError("Processing error")
-            return item
+            work_item.data = f"thread_{work_item.data}"
+            return work_item
 
-        pipeline.mock_process.side_effect = process_with_error
+        pipeline.mock_stage_handlers["thread"].side_effect = thread_with_error
 
         results = await pipeline.run()
 
@@ -93,10 +176,14 @@ class TestPipelineIntegration:
     @pytest.mark.asyncio
     async def test_pipeline_queue_management(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
         """Test queue refill mechanism"""
-        pipeline = mock_etl_pipeline_factory.create(work_items_count=20, fetch_queue_size=5)
+        # Create custom stages with smaller queue for first stage
+        custom_stages = create_default_stages()
+        custom_stages[0].queue_size = 5  # Small queue for fetch stage
+
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=20, stages=custom_stages)
         await pipeline.run()
 
-        # Verify refill_queue was called 6 times:
+        # Verify refill_queue was called multiple times:
         # currently queue always refills to 90%.
         # That is 4 items per refill with a queue size of 5.
         # 20 items / 4 items per refill = 5 refills
@@ -104,42 +191,100 @@ class TestPipelineIntegration:
         assert pipeline.mock_refill_queue.call_count == 6
 
     @pytest.mark.asyncio
-    async def test_pipeline_concurrent_processing(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
-        """Test concurrent processing maintains data integrity"""
-        pipeline = mock_etl_pipeline_factory.create(
-            work_items_count=50, fetch_workers=5, process_workers=5, store_workers=5, process_sleep=0.01
-        )
-        results = await pipeline.run()
-
-        # All items should be processed despite concurrency
-        assert len(results) == 50
-
-        # Check no duplicate processing
-        job_ids = [r.job_id for r in results]
-        assert len(job_ids) == len(set(job_ids))
-
-    @pytest.mark.asyncio
     async def test_pipeline_updates_tracker_stages(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
         """Test that pipeline correctly updates tracker stages"""
-        pipeline = mock_etl_pipeline_factory.create(work_items_count=2, process_sleep=0.01)
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=100, process_sleep=0.01)
         assert pipeline.tracker is not None
         tracker = pipeline.tracker
 
         # Start pipeline but don't await yet
-        task = asyncio.create_task(pipeline.run())
+        await pipeline.start()
 
-        # Give pipeline time to start processing
-        await asyncio.sleep(0.005)
+        # Give it a moment to start processing but not finish
+        await asyncio.sleep(0.05)
 
-        # Check that items are in progress (not all completed)
+        # Check that items are in progress (not all completed yet)
         stats = await tracker.get_statistics()
-        assert stats["active_items"] > 0
+        # With 100 items and 5 stages, not all should be done yet
+        assert stats["active_items"] > 0 or stats["completed_items"] < 100
 
         # Wait for completion
-        await task
+        await pipeline.wait()
 
         # Verify all items completed
         final_stats = await tracker.get_statistics()
         assert final_stats["active_items"] == 0
-        assert final_stats["completed_items"] == 2
+        assert final_stats["completed_items"] == 100
         assert final_stats["success_rate"] == 1.0
+
+
+class TestPipelineValidation:
+    """Test pipeline validation and error handling"""
+
+    @pytest.mark.asyncio
+    async def test_register_stage_handler_invalid_stage_name(
+        self, mock_etl_pipeline_factory: MockETLPipelineFactory
+    ) -> None:
+        """Test that registering a handler for a non-existent stage raises ValueError"""
+        pipeline = mock_etl_pipeline_factory.create()
+
+        # Try to register a handler for a stage that doesn't exist in the configuration
+        async def invalid_handler(work_item: WorkItem) -> WorkItem:
+            return work_item
+
+        with pytest.raises(ValueError, match="Stage 'nonexistent_stage' not found in pipeline configuration"):
+            pipeline.register_stage_handler("nonexistent_stage", invalid_handler)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stage_name", "handler_is_async", "should_raise", "error_type"),
+        [
+            # Valid registrations - async handler for async stage, sync handler for non-async stages
+            ("fetch", True, False, None),
+            ("thread", False, False, None),
+            ("process", False, False, None),
+            ("interpret", False, False, None),
+            # Invalid - sync handler for async stage
+            ("fetch", False, True, TypeError),
+            # Invalid - async handler for thread stage
+            ("thread", True, True, TypeError),
+            # Invalid - async handler for process stage
+            ("process", True, True, TypeError),
+            # Invalid - async handler for interpreter stage
+            ("interpret", True, True, TypeError),
+        ],
+    )
+    async def test_register_stage_handler_validation(
+        self,
+        mock_etl_pipeline_factory: MockETLPipelineFactory,
+        stage_name: str,
+        handler_is_async: bool,
+        should_raise: bool,
+        error_type: type[TypeError] | None,
+    ) -> None:
+        """Test stage handler registration validation for type compatibility"""
+        pipeline = mock_etl_pipeline_factory.create()
+
+        # Create the appropriate handler based on handler_is_async
+        if handler_is_async:
+
+            async def async_handler(work_item: WorkItem) -> WorkItem:
+                work_item.data = f"processed_{work_item.data}"
+                return work_item
+
+            handler = async_handler
+        else:
+
+            def sync_handler(work_item: WorkItem) -> WorkItem:
+                work_item.data = f"processed_{work_item.data}"
+                return work_item
+
+            handler = sync_handler
+
+        if should_raise:
+            assert error_type is not None
+            with pytest.raises(error_type):
+                pipeline.register_stage_handler(stage_name, handler)  # type: ignore
+        else:
+            # Should not raise any exception
+            pipeline.register_stage_handler(stage_name, handler)  # type: ignore

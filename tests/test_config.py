@@ -4,20 +4,14 @@ import pytest
 from typing import Any
 from conftest import MockETLPipelineFactory
 from pydantic import ValidationError
-import random
-from bergtalzug import ETLPipelineConfig, ETLPipeline, WorkItem
+from bergtalzug import ETLPipelineConfig, StageConfig, ExecutionType
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, InterpreterPoolExecutor
 
 
 @pytest.mark.parametrize(
     ("field_name", "valid_values"),
     [
         ("pipeline_name", ["test_pipeline", "", "my-etl"]),
-        ("fetch_workers", [1, 100, 1000]),
-        ("process_workers", [1, 100, 1000]),
-        ("store_workers", [1, 100, 1000]),
-        ("fetch_queue_size", [1, 500, 10000]),
-        ("process_queue_size", [1, 500, 10000]),
-        ("store_queue_size", [1, 500, 10000]),
         ("queue_refresh_rate", [0.0, 0.1, 1.0, 100.5]),
         ("stats_interval_seconds", [0.0, 0.1, 1.0, 100.5]),
         ("enable_tracking", [True, False]),
@@ -25,8 +19,11 @@ from bergtalzug import ETLPipelineConfig, ETLPipeline, WorkItem
 )
 def test_config_valid_values(field_name: str, valid_values: list[Any]) -> None:
     """Test that valid values are accepted."""
+    # Minimal valid stage configuration
+    stages = [StageConfig(name="test_stage", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10)]
+
     for value in valid_values:
-        config = ETLPipelineConfig(**{field_name: value})
+        config = ETLPipelineConfig(stages=stages, **{field_name: value})
         assert getattr(config, field_name) == value
 
 
@@ -34,12 +31,6 @@ def test_config_valid_values(field_name: str, valid_values: list[Any]) -> None:
     ("field_name", "invalid_values"),
     [
         ("pipeline_name", [123, True, None]),
-        ("fetch_workers", [0, -1, 1.5, "10", None]),
-        ("process_workers", [0, -1, 1.5, "10", None]),
-        ("store_workers", [0, -1, 1.5, "10", None]),
-        ("fetch_queue_size", [0, -1, 1.5, "1000", None]),
-        ("process_queue_size", [0, -1, 1.5, "1000", None]),
-        ("store_queue_size", [0, -1, 1.5, "1000", None]),
         ("queue_refresh_rate", [-0.1, -1, "1", None]),
         ("stats_interval_seconds", [-0.1, -1, "1", None]),
         ("enable_tracking", ["True", None]),
@@ -47,70 +38,91 @@ def test_config_valid_values(field_name: str, valid_values: list[Any]) -> None:
 )
 def test_config_invalid_values(field_name: str, invalid_values: list[Any]) -> None:
     """Test that invalid values raise ValidationError."""
+    # Minimal valid stage configuration
+    stages = [StageConfig(name="test_stage", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10)]
+
     for value in invalid_values:
         with pytest.raises(ValidationError):
-            ETLPipelineConfig(**{field_name: value})
+            ETLPipelineConfig(stages=stages, **{field_name: value})
 
 
 @pytest.mark.parametrize(
     ("config_params", "error"),
     [
-        # Combined valid parameters
+        # Valid single stage
         (
             {
                 "pipeline_name": "test",
-                "fetch_workers": 20,
-                "process_workers": 10,
-                "store_workers": 15,
+                "stages": [StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=5, queue_size=100)],
             },
             None,
         ),
-        (
-            {
-                "fetch_queue_size": 2000,
-                "process_queue_size": 1000,
-                "store_queue_size": 2000,
-                "queue_refresh_rate": 2.5,
-            },
-            None,
-        ),
+        # Valid multi-stage pipeline
         (
             {
                 "pipeline_name": "production_etl",
+                "stages": [
+                    StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=10, queue_size=1000),
+                    StageConfig(name="process", execution_type=ExecutionType.THREAD, workers=5, queue_size=500),
+                    StageConfig(name="store", execution_type=ExecutionType.ASYNC, workers=3, queue_size=100),
+                ],
+                "queue_refresh_rate": 2.5,
                 "enable_tracking": False,
                 "stats_interval_seconds": 30.0,
             },
             None,
         ),
+        # All execution types
         (
             {
-                "fetch_workers": 1,
-                "process_workers": 1,
-                "store_workers": 1,
-                "fetch_queue_size": 1,
-                "process_queue_size": 1,
-                "store_queue_size": 1,
+                "stages": [
+                    StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=1, queue_size=10),
+                    StageConfig(name="thread_stage", execution_type=ExecutionType.THREAD, workers=2, queue_size=20),
+                    StageConfig(name="process_stage", execution_type=ExecutionType.PROCESS, workers=3, queue_size=30),
+                    StageConfig(
+                        name="interpreter_stage", execution_type=ExecutionType.INTERPRETER, workers=4, queue_size=40
+                    ),
+                ],
             },
             None,
         ),
-        # Invalid combinations
+        # Minimal config - single stage
         (
             {
-                "fetch_workers": 0,
-                "process_workers": 0,
+                "stages": [StageConfig(name="only_stage", workers=1, queue_size=1)],
+            },
+            None,
+        ),
+        # Empty stages list - should fail
+        (
+            {
+                "pipeline_name": "test",
+                "stages": [],
             },
             ValidationError,
         ),
+        # Duplicate stage names - should fail
+        (
+            {
+                "stages": [
+                    StageConfig(name="duplicate", workers=1, queue_size=10),
+                    StageConfig(name="duplicate", workers=2, queue_size=20),
+                ],
+            },
+            ValueError,
+        ),
+        # Invalid parameter combination
         (
             {
                 "pipeline_name": None,
                 "enable_tracking": "yes",
+                "stages": [StageConfig(name="test", workers=1, queue_size=10)],
             },
             ValidationError,
         ),
     ],
 )
-def test_etl_pipeline_config_validation(config_params: dict[str, Any], error: type[ValidationError] | None) -> None:
+def test_etl_pipeline_config_validation(config_params: dict[str, Any], error: type[Exception] | None) -> None:
     """Test ETLPipelineConfig validation with various parameter combinations."""
     if error:
         with pytest.raises(error):
@@ -121,77 +133,99 @@ def test_etl_pipeline_config_validation(config_params: dict[str, Any], error: ty
         assert config is not None
         # Verify that provided params were set correctly
         for key, value in config_params.items():
-            assert getattr(config, key) == value
+            if key == "stages":
+                # For stages, verify length and names match
+                assert len(config.stages) == len(value)
+                for i, stage_config in enumerate(value):
+                    assert config.stages[i].name == stage_config.name
+                    assert config.stages[i].workers == stage_config.workers
+                    assert config.stages[i].queue_size == stage_config.queue_size
+                    assert config.stages[i].execution_type == stage_config.execution_type
+            else:
+                assert getattr(config, key) == value
 
 
-def test_process_is_sync_set_to_true_when_sync_process_defined() -> None:
-    """Test that _process_is_sync is True when sync_process is implemented."""
+def test_stage_config_valid_values() -> None:
+    """Test that StageConfig accepts valid values."""
+    # Test with all parameters
+    stage = StageConfig(name="test_stage", execution_type=ExecutionType.ASYNC, workers=10, queue_size=1000)
+    assert stage.name == "test_stage"
+    assert stage.execution_type == ExecutionType.ASYNC
+    assert stage.workers == 10
+    assert stage.queue_size == 1000
 
-    class TestSyncPipeline(ETLPipeline):  # pragma: no cover
-        async def refill_queue(self, count: int) -> list[WorkItem]:
-            """Empty fetch"""
-            return [WorkItem("test")]
-
-        async def fetch(self, item: WorkItem) -> WorkItem:
-            """Empty fetch"""
-            return item
-
-        def sync_process(self, item: Any) -> Any:
-            """Dummy sync process method."""
-            return item
-
-        async def store(self, item: WorkItem) -> None:
-            """Empty store"""
-            pass
-
-    pipeline = TestSyncPipeline()
-
-    # Assert that _process_is_sync is set to True
-    assert pipeline._process_is_sync is True
+    # Test with defaults
+    stage_minimal = StageConfig(name="minimal")
+    assert stage_minimal.name == "minimal"
+    assert stage_minimal.execution_type == ExecutionType.ASYNC
+    assert stage_minimal.workers == 5
+    assert stage_minimal.queue_size == 1000
 
 
-def test_process_is_sync_set_to_false_when_sync_process_not_defined() -> None:
-    """Test that _process_is_sync is False when process is implemented."""
-
-    class TestSyncPipeline(ETLPipeline):  # pragma: no cover
-        async def refill_queue(self, count: int) -> list[WorkItem]:
-            """Empty fetch"""
-            return [WorkItem("test")]
-
-        async def fetch(self, item: WorkItem) -> WorkItem:
-            """Empty fetch"""
-            return item
-
-        async def process(self, item: Any) -> Any:
-            """Dummy async process method."""
-            return item
-
-        async def store(self, item: WorkItem) -> None:
-            """Empty store"""
-            pass
-
-    pipeline = TestSyncPipeline()
-
-    # Assert that _process_is_sync is set to False
-    assert pipeline._process_is_sync is False
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("workers", 0),
+        ("workers", -1),
+        ("workers", 1.5),
+        ("workers", "10"),
+        ("queue_size", 0),
+        ("queue_size", -1),
+        ("queue_size", 1.5),
+        ("queue_size", "1000"),
+    ],
+)
+def test_stage_config_invalid_values(field_name: str, invalid_value: Any) -> None:
+    """Test that StageConfig rejects invalid values."""
+    with pytest.raises(ValidationError):
+        StageConfig(name="test", **{field_name: invalid_value})
 
 
-@pytest.mark.parametrize("count", [random.randint(1, 50) for _ in range(10)])
-def test_thread_pool_executor_size_matches_process_workers(
-    mock_etl_pipeline_factory: MockETLPipelineFactory, count: int
-) -> None:
-    """Test that ThreadPoolExecutor max_workers matches process_workers config when using sync_process."""
-    # Test with different process_workers values
-    pipeline = mock_etl_pipeline_factory.create_sync(process_workers=count)
+@pytest.mark.asyncio
+async def test_executors_created_for_sync_stages(mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
+    """Test that executors are created for sync stages (THREAD, PROCESS, INTERPRETER)."""
+    stages = [
+        StageConfig(name="async_stage", execution_type=ExecutionType.ASYNC, workers=2, queue_size=10),
+        StageConfig(name="thread_stage", execution_type=ExecutionType.THREAD, workers=3, queue_size=10),
+        StageConfig(name="process_stage", execution_type=ExecutionType.PROCESS, workers=4, queue_size=10),
+        StageConfig(name="interpreter_stage", execution_type=ExecutionType.INTERPRETER, workers=5, queue_size=10),
+    ]
 
-    # Verify that _process_executor is created and has correct max_workers
-    assert pipeline._process_executor is not None
-    assert pipeline._process_executor._max_workers == count
+    pipeline = mock_etl_pipeline_factory.create(stages=stages)
+
+    # Setup executors (normally done during start())
+    await pipeline._setup_executors()
+
+    # Verify executors dictionary has entries for sync stages only
+    assert "async_stage" not in pipeline._executors
+    assert "thread_stage" in pipeline._executors
+    assert "process_stage" in pipeline._executors
+    assert "interpreter_stage" in pipeline._executors
+
+    # Verify executor types
+    assert isinstance(pipeline._executors["thread_stage"], ThreadPoolExecutor)
+    assert isinstance(pipeline._executors["process_stage"], ProcessPoolExecutor)
+    assert isinstance(pipeline._executors["interpreter_stage"], InterpreterPoolExecutor)
+
+    # Verify worker counts for ThreadPoolExecutor (has _max_workers attribute)
+    assert pipeline._executors["thread_stage"]._max_workers == 3
+    # Note: ProcessPoolExecutor and InterpreterPoolExecutor max_workers checking is handled differently
+    # and is tested implicitly through successful executor creation
 
 
-def test_no_thread_pool_executor_when_async_process(mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
-    """Test that ThreadPoolExecutor is not created when using async process."""
-    pipeline = mock_etl_pipeline_factory.create(process_workers=10)
+@pytest.mark.asyncio
+async def test_no_executors_for_async_only_pipeline(mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
+    """Test that no executors are created for a pipeline with only async stages."""
+    stages = [
+        StageConfig(name="fetch", execution_type=ExecutionType.ASYNC, workers=5, queue_size=100),
+        StageConfig(name="process", execution_type=ExecutionType.ASYNC, workers=3, queue_size=50),
+        StageConfig(name="store", execution_type=ExecutionType.ASYNC, workers=2, queue_size=20),
+    ]
 
-    # Verify that _process_executor is None
-    assert pipeline._process_executor is None
+    pipeline = mock_etl_pipeline_factory.create(stages=stages)
+
+    # Setup executors (normally done during start())
+    await pipeline._setup_executors()
+
+    # Verify that _executors is empty
+    assert len(pipeline._executors) == 0

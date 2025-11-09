@@ -16,7 +16,7 @@ import logging
 import inspect
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, InterpreterPoolExecutor
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Annotated, cast
 from collections.abc import Callable, Awaitable
 import culsans
@@ -321,7 +321,7 @@ class ETLPipelineConfig(BaseModel):
 StageHandler = Callable[[WorkItem], Awaitable[WorkItem]] | Callable[[str, Any], WorkItem]
 
 
-class ETLPipeline(ABC):
+class ETLPipeline:
     """
     Abstract base class for a dynamic ETL pipeline.
 
@@ -547,10 +547,12 @@ class ETLPipeline(ABC):
                     await self.tracker.update_item_stage(work_item.job_id, stage_name, "started")
 
                 # Execute the handler
-                processed_item: WorkItem
                 if stage.execution_type == ExecutionType.ASYNC:
                     # Async handler
                     processed_item = cast(WorkItem, await handler(work_item))  # type: ignore
+                elif stage.execution_type == ExecutionType.THREAD:
+                    # Sync handler - run in thread
+                    processed_item: WorkItem = await loop.run_in_executor(executor, handler, work_item)  # type: ignore
                 else:
                     # Sync handler - run in executor
                     # Potentially, if needed later, pass in metadata as a dict or something similar
@@ -580,6 +582,7 @@ class ETLPipeline(ABC):
             finally:
                 input_queue.task_done()
 
+    @property
     def is_running(self) -> bool:
         """
         Check if the pipeline is currently running.

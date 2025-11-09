@@ -1,7 +1,7 @@
 """Tests for the various data models."""
 
 from datetime import timedelta
-from bergtalzug import WorkItem, WorkItemMetadata, PipelineStage, PipelineResult
+from bergtalzug import WorkItem, WorkItemMetadata, PipelineResult
 
 
 class TestWorkItemMetadata:
@@ -10,21 +10,53 @@ class TestWorkItemMetadata:
     def test_initial_state(self) -> None:
         """Test metadata is initialized correctly"""
         metadata = WorkItemMetadata()
-        assert metadata.stage == PipelineStage.CREATED
-        assert metadata.fetch_started_at is None
+        assert metadata.current_stage == "created"
+        assert metadata.created is not None
+        assert metadata.completed is None
         assert metadata.error_details is None
+        assert metadata.stage_timings == {}
 
     def test_stage_transitions(self) -> None:
         """Test stage transitions are recorded properly"""
         metadata = WorkItemMetadata()
-        metadata.add_stage_transition(PipelineStage.FETCHING)
-        assert metadata.stage == PipelineStage.FETCHING
+
+        # Test adding a stage transition
+        metadata.add_stage_transition("fetching")
+        assert metadata.current_stage == "fetching"
+        assert "fetching" in metadata.stage_timings
+        assert "started" in metadata.stage_timings["fetching"]
+
+        # Test adding a queued transition
+        metadata.add_stage_transition("processing", "queued")
+        assert metadata.current_stage == "processing"
+        assert "queued" in metadata.stage_timings["processing"]
 
     def test_custom_metadata(self) -> None:
         """Test custom metadata storage"""
         metadata = WorkItemMetadata()
         metadata.custom_metadata["key"] = "value"
         assert metadata.custom_metadata["key"] == "value"
+
+    def test_get_stage_duration(self) -> None:
+        """Test stage duration calculation"""
+        metadata = WorkItemMetadata()
+
+        # Add started transition
+        metadata.add_stage_transition("processing", "started")
+
+        # Add completed transition (small delay will occur naturally)
+        metadata.add_stage_transition("processing", "completed")
+
+        duration = metadata.get_stage_duration("processing")
+        assert duration is not None
+        assert duration >= 0
+
+        # Test non-existent stage
+        assert metadata.get_stage_duration("nonexistent") is None
+
+        # Test incomplete stage (only started, not completed)
+        metadata.add_stage_transition("incomplete", "started")
+        assert metadata.get_stage_duration("incomplete") is None
 
 
 class TestWorkItem:
@@ -52,7 +84,7 @@ class TestPipelineResult:
         wait_time = timedelta(seconds=2)
 
         # Simulate completion after 2 seconds
-        metadata.completed_at = metadata.created_at + wait_time
+        metadata.completed = metadata.created + wait_time
 
         result = PipelineResult(job_id="test", success=True, metadata=metadata)
         assert result.total_duration == wait_time.total_seconds()

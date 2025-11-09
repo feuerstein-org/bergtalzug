@@ -3,7 +3,7 @@
 import pytest
 import asyncio
 from typing import cast
-from bergtalzug import ItemTracker, WorkItem, PipelineStage, PipelineResult
+from bergtalzug import ItemTracker, WorkItem, PipelineResult
 
 
 class TestItemTracker:
@@ -12,7 +12,7 @@ class TestItemTracker:
     @pytest.mark.asyncio
     async def test_register_item(self) -> None:
         """Test registering new items"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
         item = WorkItem(data="test")
 
         await tracker.register_item(item)
@@ -20,28 +20,29 @@ class TestItemTracker:
 
         assert len(active_items) == 1
         assert active_items[0].job_id == item.job_id
+        assert active_items[0].metadata.current_stage == "created"
 
     @pytest.mark.asyncio
     async def test_create_and_update_item_stage(self) -> None:
         """Test updating item stages"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
         item = WorkItem(data="test")
 
         await tracker.register_item(item)
 
         active = await tracker.get_active_items()
-        assert active[0].metadata.stage == PipelineStage.CREATED
+        assert active[0].metadata.current_stage == "created"
 
-        await tracker.update_item_stage(item.job_id, PipelineStage.FETCHING)
+        await tracker.update_item_stage(item.job_id, "fetch")
 
         active = await tracker.get_active_items()
         assert len(active) == 1
-        assert active[0].metadata.stage == PipelineStage.FETCHING
+        assert active[0].metadata.current_stage == "fetch"
 
     @pytest.mark.asyncio
     async def test_complete_item_success(self) -> None:
         """Test completing items successfully"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
         item = WorkItem(data="test")
 
         await tracker.register_item(item)
@@ -60,7 +61,7 @@ class TestItemTracker:
     @pytest.mark.asyncio
     async def test_complete_item_with_error(self) -> None:
         """Test completing items with errors"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
         item = WorkItem(data="test")
         error = ValueError("Test error")
 
@@ -70,12 +71,12 @@ class TestItemTracker:
         assert result is not None
         assert result.success is False
         assert result.error == error
-        assert result.metadata.stage == PipelineStage.ERROR
+        assert result.metadata.current_stage == "error"
 
     @pytest.mark.asyncio
     async def test_completion_callbacks(self) -> None:
         """Test completion callbacks are triggered"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
         callback_called = False
         callback_result: PipelineResult | None = None
 
@@ -98,16 +99,16 @@ class TestItemTracker:
     @pytest.mark.asyncio
     async def test_get_statistics(self) -> None:
         """Test statistics calculation"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
 
         # Add items in different stages
         for i in range(3):
             item = WorkItem(data=f"test{i}".encode())
             await tracker.register_item(item)
             if i == 0:
-                await tracker.update_item_stage(item.job_id, PipelineStage.FETCHING)
+                await tracker.update_item_stage(item.job_id, "fetch")
             elif i == 1:
-                await tracker.update_item_stage(item.job_id, PipelineStage.PROCESSING)
+                await tracker.update_item_stage(item.job_id, "process")
 
         # Complete one item
         completed_item = WorkItem(data="completed")
@@ -119,18 +120,18 @@ class TestItemTracker:
         assert stats["active_items"] == 3
         assert stats["completed_items"] == 1
         assert stats["success_rate"] == 1.0
-        assert "fetching" in stats["active_by_stage"]
+        assert "fetch" in stats["active_by_stage"]
 
     @pytest.mark.asyncio
     async def test_concurrent_access(self) -> None:
         """Test thread-safe concurrent access"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
 
         async def add_items(start_idx: int, count: int) -> None:
             for i in range(start_idx, start_idx + count):
                 item = WorkItem(data=f"item{i}".encode())
                 await tracker.register_item(item)
-                await tracker.update_item_stage(item.job_id, PipelineStage.PROCESSING)
+                await tracker.update_item_stage(item.job_id, "process")
 
         # Run multiple coroutines concurrently
         await asyncio.gather(add_items(0, 10), add_items(10, 10), add_items(20, 10))
@@ -141,7 +142,7 @@ class TestItemTracker:
     @pytest.mark.asyncio
     async def test_nonexistent_job_id(self) -> None:
         """Test completing an item with a nonexistent job ID"""
-        tracker = ItemTracker()
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
         item = WorkItem(data="test")
 
         with pytest.raises(RuntimeError):
