@@ -645,7 +645,7 @@ class ETLPipeline:
         This method cancels the queue manager task and initiates shutdown.
         Workers will finish processing current items before shutting down.
 
-        Note: After calling stop(), you should still call wait() to ensure
+        Note: After calling stop(), you should still call run() to ensure
         all resources are properly cleaned up.
         """
         if not self._running:
@@ -659,14 +659,14 @@ class ETLPipeline:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._queue_manager_task
 
-        self.logger.info("Pipeline stop initiated. Call wait() to complete shutdown.")
+        self.logger.info("Pipeline stop initiated. Call run() to complete shutdown.")
 
     async def start(self) -> None:
         """
         Start the ETL pipeline without blocking.
 
         This method initializes queues, executors, and workers, then returns immediately.
-        Use `is_running()` to check status and `wait()` to wait for completion.
+        Use `is_running()` to check status and `run()` to wait for completion.
 
         Example:
             ```python
@@ -679,7 +679,7 @@ class ETLPipeline:
                 await asyncio.sleep(1)
 
             # Wait for completion
-            results = await pipeline.wait()
+            results = await pipeline.run()
             ```
 
         Raises:
@@ -728,23 +728,37 @@ class ETLPipeline:
 
         self.logger.info("Pipeline started successfully")
 
-    async def wait(self) -> list[PipelineResult]:
+    async def run(self) -> list[PipelineResult]:
         """
-        Wait for the pipeline to complete and return results.
+        Start the ETL pipeline and block until completion.
 
-        This method blocks until all items are processed and workers shut down.
-        Must be called after `start()`. Can also be called after `stop()` to
-        ensure proper cleanup.
+        This method will call `start()` if the pipeline is not already running,
+        then wait for all items to be processed and workers to shut down.
+
+        For non-blocking operation with monitoring, use `start()` separately:
+            ```python
+            # Option 1: Simple blocking run
+            results = await pipeline.run()
+
+            # Option 2: Non-blocking with monitoring
+            await pipeline.start()
+            while pipeline.is_running():
+                stats = await pipeline.get_pipeline_stats()
+                print(f"Active: {stats['active_items']}")
+                await asyncio.sleep(1)
+            results = await pipeline.run()
+            ```
 
         Returns:
             List of PipelineResults if tracking is enabled, empty list otherwise
 
         Raises:
-            RuntimeError: If pipeline is not running
+            RuntimeError: If handlers are not registered
 
         """
+        # Start pipeline if not already running
         if not self._running:
-            raise RuntimeError("Pipeline is not running. Call start() first.")
+            await self.start()
 
         if self._queue_manager_task is None:
             raise RuntimeError("Pipeline not properly initialized")
@@ -800,31 +814,3 @@ class ETLPipeline:
             self._running = False
             self._queue_manager_task = None
             self._worker_tasks = []
-
-    async def run(self) -> list[PipelineResult]:
-        """
-        Start the ETL pipeline and block until completion.
-
-        This is a convenience method that calls `start()` followed by `wait()`.
-        For more control over pipeline lifecycle, use `start()`, `is_running()`, and `wait()` separately.
-
-        Example with monitoring:
-            ```python
-            # Option 1: Simple blocking run
-            results = await pipeline.run()
-
-            # Option 2: Non-blocking with monitoring
-            await pipeline.start()
-            while pipeline.is_running():
-                stats = await pipeline.get_pipeline_stats()
-                print(f"Active: {stats['active_items']}")
-                await asyncio.sleep(1)
-            results = await pipeline.wait()
-            ```
-
-        Returns:
-            List of PipelineResults if tracking is enabled, empty list otherwise
-
-        """
-        await self.start()
-        return await self.wait()
