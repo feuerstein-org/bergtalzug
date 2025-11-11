@@ -100,8 +100,6 @@ class WorkItemResult:
         return None
 
 
-# TODO: Currently both read and write operations acquire a lock - this might be a bottleneck
-# Potentially switch to a different approach like a queue, Reader-writer locks etc.
 class ItemTracker:
     """Tracks all items flowing through the pipeline with dynamic stages"""
 
@@ -190,48 +188,52 @@ class ItemTracker:
 
     async def get_statistics(self) -> dict[str, Any]:
         """Get pipeline statistics"""
+        # Quick snapshot under lock to avoid iteration errors
         async with self._lock:
-            active_stages: dict[str, int] = {}
-            for item in self._items.values():
-                stage = item.metadata.current_stage
-                active_stages[stage] = active_stages.get(stage, 0) + 1
+            items_snapshot = list(self._items.values())
+            completed_snapshot = list(self._completed.values())
 
-            completed_count = len(self._completed)
-            success_count = sum(1 for r in self._completed.values() if r.success)
+        # Do expensive calculations outside the lock
+        active_stages: dict[str, int] = {}
+        for item in items_snapshot:
+            stage = item.metadata.current_stage
+            active_stages[stage] = active_stages.get(stage, 0) + 1
 
-            avg_duration = None
-            if self._completed:
-                durations = [r.total_duration for r in self._completed.values() if r.total_duration]
-                if durations:
-                    avg_duration = sum(durations) / len(durations)
+        completed_count = len(completed_snapshot)
+        success_count = sum(1 for r in completed_snapshot if r.success)
 
-            # This is potentially expensive, consider caching or optimizing
-            # Stage-specific average durations
-            stage_durations: dict[str, list[float]] = {stage: [] for stage in self._stage_names}
+        avg_duration = None
+        if completed_snapshot:
+            durations = [r.total_duration for r in completed_snapshot if r.total_duration]
+            if durations:
+                avg_duration = sum(durations) / len(durations)
 
-            for result in self._completed.values():
-                metadata = result.metadata
-                for stage in self._stage_names:
-                    duration = metadata.get_stage_duration(stage)
-                    if duration is not None:
-                        stage_durations[stage].append(duration)
+        # Stage-specific average durations
+        stage_durations: dict[str, list[float]] = {stage: [] for stage in self._stage_names}
 
-            # Averages for each stage
-            avg_stage_durations = {}
-            for stage, durations in stage_durations.items():
-                if durations:
-                    avg_stage_durations[f"average_{stage}_duration_seconds"] = sum(durations) / len(durations)
-                else:
-                    avg_stage_durations[f"average_{stage}_duration_seconds"] = None
+        for result in completed_snapshot:
+            metadata = result.metadata
+            for stage in self._stage_names:
+                duration = metadata.get_stage_duration(stage)
+                if duration is not None:
+                    stage_durations[stage].append(duration)
 
-            return {
-                "active_items": len(self._items),
-                "active_by_stage": active_stages,
-                "completed_items": completed_count,
-                "success_rate": success_count / completed_count if completed_count > 0 else 0,
-                "average_duration_seconds": avg_duration,
-                **avg_stage_durations,
-            }
+        # Averages for each stage
+        avg_stage_durations = {}
+        for stage, durations in stage_durations.items():
+            if durations:
+                avg_stage_durations[f"average_{stage}_duration_seconds"] = sum(durations) / len(durations)
+            else:
+                avg_stage_durations[f"average_{stage}_duration_seconds"] = None
+
+        return {
+            "active_items": len(items_snapshot),
+            "active_by_stage": active_stages,
+            "completed_items": completed_count,
+            "success_rate": success_count / completed_count if completed_count > 0 else 0,
+            "average_duration_seconds": avg_duration,
+            **avg_stage_durations,
+        }
 
     async def log_statistics(self, logger: logging.Logger) -> None:
         """Log pipeline statistics"""
