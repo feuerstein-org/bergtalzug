@@ -228,7 +228,7 @@ class TestPipelineIntegration:
         assert stats["active_items"] > 0 or stats["completed_items"] < 100
 
         # Wait for completion
-        await pipeline.wait()
+        await pipeline.run()
 
         # Verify all items completed
         final_stats = await tracker.get_statistics()
