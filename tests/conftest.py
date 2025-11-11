@@ -72,6 +72,11 @@ class MockETLPipeline(ETLPipeline):
     Note: Process and Interpreter stages cannot use mocks (not picklable), so they use real functions.
     """
 
+    def _validate_handler_signature(self, stage_name: str, stage_config: StageConfig, handler: Any) -> None:
+        """Override validation to allow mock handlers with *args, **kwargs."""
+        # Skip validation for mock pipeline - mocks have *args, **kwargs which would fail validation
+        pass
+
     def __init__(self, mocker: MockerFixture, config: MockETLPipelineConfig) -> None:
         """Initialize the mock ETL pipeline with configuration."""
         # Use default stages if none provided
