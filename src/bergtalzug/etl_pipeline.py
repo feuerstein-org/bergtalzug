@@ -2,7 +2,7 @@
 Dynamic ETL Pipeline Implementation
 
 This module implements a flexible ETL pipeline with user-defined stages using asyncio and culsans.
-Users can configure any number of stages, each with custom concurrency models:
+Configure any number of stages, each with custom concurrency models:
 - Async stages (native asyncio)
 - Sync stages with ThreadPoolExecutor
 - Sync stages with ProcessPoolExecutor
@@ -100,7 +100,7 @@ class WorkItemResult:
         return None
 
 
-# TODO: Currently both, read and write operation acquire a lock - this might be a bottleneck
+# TODO: Currently both read and write operations acquire a lock - this might be a bottleneck
 # Potentially switch to a different approach like a queue, Reader-writer locks etc.
 class ItemTracker:
     """Tracks all items flowing through the pipeline with dynamic stages"""
@@ -150,7 +150,7 @@ class ItemTracker:
                 # TODO: Maybe refactor the code to also check for correct IDs after each stage
                 # This check only applies for the refill_queue function currently
                 raise RuntimeError(
-                    f"Unknown job ID: {job_id} - this could be due to `refill_queue` items with duplicate job IDs"
+                    f"Unknown job ID: {job_id} - this could be due to `refill_queue` returning items with duplicate job IDs"
                 )
 
             item = self._items[job_id]
@@ -295,7 +295,7 @@ class ETLPipelineConfig(BaseModel):
         pipeline_name: Name of the pipeline for logging
         stages: List of stage configurations defining the pipeline
         queue_refresh_rate: Interval in seconds to check and refill the first queue
-        enable_tracking: Whether to enable item tracking, will return WorkItemResult on completion
+        enable_tracking: Whether to enable item tracking; will return WorkItemResult on completion
         stats_interval_seconds: Interval in seconds to report pipeline statistics - if 0 disables reporting
 
     Raises:
@@ -330,8 +330,15 @@ class ETLPipeline:
     Data flows through user-defined stages as `WorkItem` objects.
     Each stage can be either async or sync, with sync stages supporting
     ThreadPoolExecutor, ProcessPoolExecutor, or InterpreterPoolExecutor.
+    To decide which type to choose please consult the README.
 
-    Users must:
+    Note the different function signatures for async and sync handlers:
+        ASYNC/THREAD stages require: handler(item: WorkItem) -> WorkItem
+        PROCESS/INTERPRETER stages require: handler(job_id: str, data: Any) -> Any
+
+    Those are enforced when registering stage handlers.
+    See the README for more details on handler signatures.
+
     1. Define a config with their desired stages (StageConfig)
     2. Implement refill_queue() to provide work items
     3. Provide handler functions for each stage via register_stage_handler()
@@ -399,9 +406,6 @@ class ETLPipeline:
     def _validate_handler_signature(self, stage_name: str, stage_config: StageConfig, handler: StageHandler) -> None:
         """
         Validate that handler function signature matches the execution type requirements.
-
-        ASYNC/THREAD stages require: handler(item: WorkItem) -> WorkItem
-        PROCESS/INTERPRETER stages require: handler(job_id: str, data: Any) -> Any
 
         Args:
             stage_name: Name of the stage (for error messages)
@@ -681,6 +685,9 @@ class ETLPipeline:
             # Wait for completion
             results = await pipeline.run()
             ```
+
+        You can also use `stop()` to gracefully stop the pipeline.
+        If you don't need to execute code during runtime you can simply call `run()` which will start and wait for completion in one step.
 
         Raises:
             RuntimeError: If handlers are not registered
