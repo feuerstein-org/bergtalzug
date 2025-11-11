@@ -296,7 +296,7 @@ class ETLPipelineConfig(BaseModel):
         stages: List of stage configurations defining the pipeline
         queue_refresh_rate: Interval in seconds to check and refill the first queue
         enable_tracking: Whether to enable item tracking, will return PipelineResult on completion
-        stats_interval_seconds: Interval in seconds to report pipeline statistics
+        stats_interval_seconds: Interval in seconds to report pipeline statistics - if 0 disables reporting
 
     Raises:
         ValidationError: If any of the provided parameters are invalid
@@ -746,7 +746,8 @@ class ETLPipeline:
             results = []
             if self.tracker:
                 results = await self.tracker.get_completed_results()
-                await self.tracker.log_statistics(self.logger)
+                if self.config.stats_interval_seconds > 0:
+                    await self.tracker.log_statistics(self.logger)
             else:
                 self.logger.info("ETL pipeline %s completed", self.pipeline_name)
 
