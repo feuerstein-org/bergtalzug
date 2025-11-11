@@ -3,7 +3,7 @@
 import pytest
 import asyncio
 from typing import cast
-from bergtalzug import ItemTracker, WorkItem, PipelineResult
+from bergtalzug import ItemTracker, WorkItem, WorkItemResult
 
 
 class TestItemTracker:
@@ -78,9 +78,9 @@ class TestItemTracker:
         """Test completion callbacks are triggered"""
         tracker = ItemTracker(stage_names=["fetch", "process", "store"])
         callback_called = False
-        callback_result: PipelineResult | None = None
+        callback_result: WorkItemResult | None = None
 
-        def callback(result: PipelineResult) -> None:
+        def callback(result: WorkItemResult) -> None:
             nonlocal callback_called, callback_result
             callback_called = True
             callback_result = result
@@ -93,7 +93,7 @@ class TestItemTracker:
 
         assert callback_called is True
 
-        result = cast(PipelineResult, callback_result)
+        result = cast(WorkItemResult, callback_result)
         assert result.job_id == item.job_id
 
     @pytest.mark.asyncio

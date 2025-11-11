@@ -1,7 +1,7 @@
 """Tests for the various data models."""
 
 from datetime import timedelta
-from bergtalzug import WorkItem, WorkItemMetadata, PipelineResult
+from bergtalzug import WorkItem, WorkItemMetadata, WorkItemResult
 
 
 class TestWorkItemMetadata:
@@ -75,8 +75,8 @@ class TestWorkItem:
         assert item.job_id == "custom-123"
 
 
-class TestPipelineResult:
-    """Test PipelineResult calculations"""
+class TestWorkItemResult:
+    """Test WorkItemResult calculations"""
 
     def test_total_duration_calculation(self) -> None:
         """Test duration is calculated correctly"""
@@ -86,10 +86,10 @@ class TestPipelineResult:
         # Simulate completion after 2 seconds
         metadata.completed = metadata.created + wait_time
 
-        result = PipelineResult(job_id="test", success=True, metadata=metadata)
+        result = WorkItemResult(job_id="test", success=True, metadata=metadata)
         assert result.total_duration == wait_time.total_seconds()
 
     def test_total_duration_incomplete(self) -> None:
         """Test duration is None for incomplete items"""
-        result = PipelineResult(job_id="test", success=False, metadata=WorkItemMetadata())
+        result = WorkItemResult(job_id="test", success=False, metadata=WorkItemMetadata())
         assert result.total_duration is None
