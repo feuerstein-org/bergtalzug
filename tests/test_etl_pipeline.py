@@ -235,3 +235,17 @@ class TestPipelineIntegration:
         assert final_stats["active_items"] == 0
         assert final_stats["completed_items"] == 100
         assert final_stats["success_rate"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_pipeline_not_properly_initialized_error(
+        self, mock_etl_pipeline_factory: MockETLPipelineFactory
+    ) -> None:
+        """Test that run() raises RuntimeError if pipeline is not properly initialized"""
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=5)
+
+        # Set pipeline to running
+        pipeline._running = True
+
+        # Verify that run() raises RuntimeError with the expected message
+        with pytest.raises(RuntimeError, match="Pipeline not properly initialized"):
+            await pipeline.run()

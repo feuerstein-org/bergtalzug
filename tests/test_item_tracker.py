@@ -147,3 +147,17 @@ class TestItemTracker:
 
         with pytest.raises(RuntimeError):
             await tracker.complete_item(item.job_id)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_job_id_error(self) -> None:
+        """Test that completing an already completed item raises RuntimeError with duplicate job ID message"""
+        tracker = ItemTracker(stage_names=["fetch", "process", "store"])
+        item = WorkItem(data="test")
+
+        # Register and complete the item
+        await tracker.register_item(item)
+        await tracker.complete_item(item.job_id, success=True)
+
+        # Attempting to complete the same job_id again should raise RuntimeError
+        with pytest.raises(RuntimeError, match=r"Unknown job ID.*duplicate job IDs"):
+            await tracker.complete_item(item.job_id, success=True)
