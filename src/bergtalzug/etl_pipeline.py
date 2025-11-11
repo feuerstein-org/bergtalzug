@@ -123,7 +123,7 @@ class ItemTracker:
         """Register a new item entering the pipeline"""
         async with self._lock:
             self._items[item.job_id] = item
-            item.metadata.add_stage_transition("created")
+            item.metadata.add_stage_transition("created", "queued")
 
     async def update_item_stage(self, job_id: str, stage: str, transition_type: str = "started") -> None:
         """
@@ -259,6 +259,9 @@ class ItemTracker:
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 NonNegativeFloat = Annotated[float, Field(ge=0, strict=True)]
 
+# Reserved stage names that cannot be used for user-defined stages
+RESERVED_STAGE_NAMES = {"created", "completed", "error"}
+
 
 class ExecutionType(str, Enum):
     """Execution types for pipeline stages"""
@@ -311,8 +314,17 @@ class ETLPipelineConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Validate pipeline configuration"""
-        # Check for duplicate stage names
+        # Check for reserved stage names
         stage_names = [stage.name for stage in self.stages]
+        reserved_conflicts = [name for name in stage_names if name in RESERVED_STAGE_NAMES]
+        if reserved_conflicts:
+            raise ValueError(
+                f"Stage name(s) {reserved_conflicts} are reserved. "
+                f"Reserved names: {(RESERVED_STAGE_NAMES)}. "
+                f"Please choose different stage names."
+            )
+
+        # Check for duplicate stage names
         if len(stage_names) != len(set(stage_names)):
             raise ValueError("Stage names must be unique")
 

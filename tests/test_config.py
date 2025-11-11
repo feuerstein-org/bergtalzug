@@ -229,3 +229,25 @@ async def test_no_executors_for_async_only_pipeline(mock_etl_pipeline_factory: M
 
     # Verify that _executors is empty
     assert len(pipeline._executors) == 0
+
+
+def test_reserved_stage_names_rejected() -> None:
+    """Test that reserved stage names raise ValueError with appropriate error message."""
+    invalid_names = ["created", "completed", "error"]
+
+    for name in invalid_names:
+        with pytest.raises(ValueError, match=r"Stage name\(s\) .* are reserved") as exc_info:
+            ETLPipelineConfig(stages=[StageConfig(name=name, workers=1, queue_size=10)])
+
+        error_message = str(exc_info.value)
+        # Verify error message contains the reserved name
+        assert name in error_message
+
+
+def test_non_reserved_stage_names_accepted() -> None:
+    """Test that non-reserved stage names are accepted."""
+    valid_names = ["fetch", "process", "store", "Created", "COMPLETED", "Error"]
+
+    for name in valid_names:
+        config = ETLPipelineConfig(stages=[StageConfig(name=name, workers=1, queue_size=10)])
+        assert config.stages[0].name == name

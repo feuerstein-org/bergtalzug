@@ -116,6 +116,9 @@ config = ETLPipelineConfig(
 )
 ```
 
+> Note:
+The names `created`, `completed` and `error` are reserved and can't be used as Stage names.
+
 ## 2. Create Your Pipeline Class
 
 Inherit from `ETLPipeline` and implement `refill_queue()`:
