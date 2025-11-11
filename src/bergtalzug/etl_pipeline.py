@@ -383,6 +383,7 @@ class ETLPipeline:
 
         Raises:
             ValueError: If stage_name is not in the configured stages
+            TypeError: If handler signature doesn't match execution type requirements
 
         """
         stage_config = next((s for s in self._stages if s.name == stage_name), None)
@@ -390,18 +391,60 @@ class ETLPipeline:
             raise ValueError(f"Stage '{stage_name}' not found in pipeline configuration")
 
         # Validate handler matches stage configuration
-        is_handler_async = inspect.iscoroutinefunction(handler)
-
-        if stage_config.execution_type == ExecutionType.ASYNC and not is_handler_async:
-            raise TypeError(f"Stage '{stage_name}' is configured with execution_type=ASYNC but handler is sync")
-        if stage_config.execution_type != ExecutionType.ASYNC and is_handler_async:
-            raise TypeError(
-                f"Stage '{stage_name}' is configured with execution_type={stage_config.execution_type.value} "
-                f"but handler is async"
-            )
+        self._validate_handler_signature(stage_name, stage_config, handler)
 
         self._stage_handlers[stage_name] = handler
         self.logger.debug("Registered handler for stage '%s'", stage_name)
+
+    def _validate_handler_signature(self, stage_name: str, stage_config: StageConfig, handler: StageHandler) -> None:
+        """
+        Validate that handler function signature matches the execution type requirements.
+
+        ASYNC/THREAD stages require: handler(item: WorkItem) -> WorkItem
+        PROCESS/INTERPRETER stages require: handler(job_id: str, data: Any) -> Any
+
+        Args:
+            stage_name: Name of the stage (for error messages)
+            stage_config: Stage configuration
+            handler: The handler function to validate
+
+        Raises:
+            TypeError: If handler signature is invalid for the execution type
+
+        """
+        is_handler_async = inspect.iscoroutinefunction(handler)
+        sig = inspect.signature(handler)
+        params = list(sig.parameters.values())
+
+        # Check async/sync consistency
+        if stage_config.execution_type == ExecutionType.ASYNC and not is_handler_async:
+            raise TypeError(
+                f"Stage '{stage_name}' is configured with execution_type=ASYNC but handler is not async. "
+                f"Expected: async def {handler.__name__}(item: WorkItem) -> WorkItem"
+            )
+        if stage_config.execution_type != ExecutionType.ASYNC and is_handler_async:
+            raise TypeError(
+                f"Stage '{stage_name}' is configured with execution_type={stage_config.execution_type.value} "
+                f"but handler is async. Expected synchronous function."
+            )
+
+        # Check parameter signature based on execution type
+
+        # Should have exactly 1 parameter (WorkItem)
+        if stage_config.execution_type in (ExecutionType.ASYNC, ExecutionType.THREAD) and len(params) != 1:
+            raise TypeError(
+                f"Stage '{stage_name}' handler for {stage_config.execution_type.value} execution "
+                f"must accept exactly 1 parameter (item: WorkItem), got {len(params)} parameters. "
+                f"Expected signature: {'async ' if is_handler_async else ''}def {handler.__name__}(item: WorkItem) -> WorkItem"
+            )
+
+        # Should have exactly 2 parameters (job_id: str, data: Any)
+        if stage_config.execution_type in (ExecutionType.PROCESS, ExecutionType.INTERPRETER) and len(params) != 2:  # noqa: PLR2004
+            raise TypeError(
+                f"Stage '{stage_name}' handler for {stage_config.execution_type.value} execution "
+                f"must accept exactly 2 parameters (job_id: str, data: Any), got {len(params)} parameters. "
+                f"Expected signature: def {handler.__name__}(job_id: str, data: Any) -> Any"
+            )
 
     @abstractmethod
     async def refill_queue(self, count: int) -> list[WorkItem]:
