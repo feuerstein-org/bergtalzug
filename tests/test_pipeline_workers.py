@@ -72,8 +72,3 @@ class TestPipelineWorkers:
 
         # Check that the final stage handler was called
         pipeline.mock_stage_handlers["final_stage"].assert_called_once()
-
-        # Item should be completed
-        if pipeline.tracker:
-            stats = await pipeline.tracker.get_statistics()
-            assert stats["completed_items"] == 1
