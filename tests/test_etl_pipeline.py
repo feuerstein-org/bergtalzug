@@ -249,3 +249,41 @@ class TestPipelineIntegration:
         # Verify that run() raises RuntimeError with the expected message
         with pytest.raises(RuntimeError, match="Pipeline not properly initialized"):
             await pipeline.run()
+
+    @pytest.mark.asyncio
+    async def test_stop_method_graceful_shutdown(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
+        """Test that stop() gracefully stops the pipeline and cancels queue manager"""
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=100, process_sleep=0.01)
+
+        # Start the pipeline
+        await pipeline.start()
+        assert pipeline.is_running is True
+        assert pipeline._queue_manager_task is not None
+        initial_task = pipeline._queue_manager_task
+
+        # Give it a moment to start processing
+        await asyncio.sleep(0.05)
+
+        # Stop the pipeline
+        await pipeline.stop()
+
+        # Verify queue manager task was cancelled
+        assert initial_task.done()
+        assert initial_task.cancelled()
+
+        # Pipeline should still be marked as running until run() completes
+        assert pipeline.is_running is True
+
+    @pytest.mark.asyncio
+    async def test_stop_method_when_not_running(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
+        """Test that stop() handles being called when pipeline is not running"""
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=5)
+
+        # Pipeline hasn't been started yet
+        assert pipeline.is_running is False
+
+        # Calling stop should not raise an error, just log a warning
+        await pipeline.stop()
+
+        # Pipeline should still not be running
+        assert pipeline.is_running is False
