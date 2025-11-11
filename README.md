@@ -15,11 +15,13 @@ Bergtalzug implements a **dynamic multi-stage pipeline architecture** where you 
 
 Data flows through stages as `WorkItem` objects. Each stage has its own pool of workers:
 
+```
                     Stage1      Stage2      Stage3      Stage4
                     Stage1      Stage2      Stage3      Stage4
 refill_queue()  ->  Stage1  ->  Stage2  ->  Stage3  ->  Stage4
                     Stage1      Stage2      Stage3      Stage4
                     Stage1      Stage2      Stage3      Stage4
+```
 
 Each `WorkItem` goes through the entire pipeline sequentially before being marked as "completed". Items are retrieved by implementing the `refill_queue()` method, which the pipeline calls automatically when the first stage's queue needs refilling. The size of each queue that feeds into each stage is defined in the Stage configuration you create.
 
