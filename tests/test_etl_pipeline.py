@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from conftest import work_item_factory, MockETLPipelineFactory, create_default_stages
 from bergtalzug.etl_pipeline import StageConfig, ExecutionType, WorkItem
+from pytest_mock import MockerFixture
 
 
 class TestPipelineIntegration:
@@ -148,6 +149,24 @@ class TestPipelineIntegration:
         assert pipeline.mock_stage_handlers["thread"].call_count == 15
         # process (process) and interpret (interpreter) are not mocked
         assert pipeline.mock_stage_handlers["store"].call_count == 15
+
+    @pytest.mark.asyncio
+    async def test_pipeline_with_stats_disabled(
+        self, mock_etl_pipeline_factory: MockETLPipelineFactory, mocker: MockerFixture
+    ) -> None:
+        """Test that stats are not reported when stats_interval_seconds=0"""
+        pipeline = mock_etl_pipeline_factory.create(work_items_count=10, stats_interval_seconds=0.0)
+
+        # Mock the tracker's log_statistics method to verify it's not called
+        log_stats_spy = mocker.spy(pipeline.tracker, "log_statistics")
+
+        results = await pipeline.run()
+
+        assert len(results) == 10
+        assert all(r.success for r in results)
+
+        # Verify that log_statistics was never called during periodic reporting
+        assert log_stats_spy.call_count == 0
 
     @pytest.mark.asyncio
     async def test_pipeline_with_errors(self, mock_etl_pipeline_factory: MockETLPipelineFactory) -> None:
