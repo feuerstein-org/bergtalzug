@@ -41,7 +41,7 @@ class WorkItemMetadata:
 
     def add_stage_transition(self, stage: str, transition_type: str = "started") -> None:
         """
-        Record a stage transition with timestamp.
+        Record a stage transition with timestamp. Should only be called internally by the pipeline.
 
         Args:
             stage: Name of the stage
@@ -84,7 +84,7 @@ class WorkItem:
 
 
 @dataclass
-class PipelineResult:
+class WorkItemResult:
     """Result of a completed WorkItem"""
 
     job_id: str
@@ -114,9 +114,9 @@ class ItemTracker:
 
         """
         self._items: dict[str, WorkItem] = {}
-        self._completed: dict[str, PipelineResult] = {}
+        self._completed: dict[str, WorkItemResult] = {}
         self._lock = asyncio.Lock()
-        self._callbacks: list[Callable[[PipelineResult], None]] = []
+        self._callbacks: list[Callable[[WorkItemResult], None]] = []
         self._stage_names = stage_names
 
     async def register_item(self, item: WorkItem) -> None:
@@ -141,7 +141,7 @@ class ItemTracker:
 
     async def complete_item(
         self, job_id: str, success: bool = True, error: Exception | None = None
-    ) -> PipelineResult | None:
+    ) -> WorkItemResult | None:
         """Mark an item as completed"""
         callbacks_to_run = []
 
@@ -157,10 +157,10 @@ class ItemTracker:
             item.metadata.completed = datetime.now(timezone.utc)
             item.metadata.current_stage = "completed" if success else "error"
 
-            result = PipelineResult(job_id=job_id, success=success, metadata=item.metadata, error=error)
+            result = WorkItemResult(job_id=job_id, success=success, metadata=item.metadata, error=error)
 
             self._completed[job_id] = result
-            del self._items[job_id]
+            del self._items[job_id]  # Allow garbage collection of the data
 
             # Copy callbacks while still under lock
             callbacks_to_run = self._callbacks.copy()
@@ -174,7 +174,7 @@ class ItemTracker:
 
         return result
 
-    def add_completion_callback(self, callback: Callable[[PipelineResult], None]) -> None:
+    def add_completion_callback(self, callback: Callable[[WorkItemResult], None]) -> None:
         """Add a callback to be called when items complete"""
         self._callbacks.append(callback)
 
@@ -183,7 +183,7 @@ class ItemTracker:
         async with self._lock:
             return list(self._items.values())
 
-    async def get_completed_results(self) -> list[PipelineResult]:
+    async def get_completed_results(self) -> list[WorkItemResult]:
         """Get all completed results"""
         async with self._lock:
             return list(self._completed.values())
@@ -295,7 +295,7 @@ class ETLPipelineConfig(BaseModel):
         pipeline_name: Name of the pipeline for logging
         stages: List of stage configurations defining the pipeline
         queue_refresh_rate: Interval in seconds to check and refill the first queue
-        enable_tracking: Whether to enable item tracking, will return PipelineResult on completion
+        enable_tracking: Whether to enable item tracking, will return WorkItemResult on completion
         stats_interval_seconds: Interval in seconds to report pipeline statistics - if 0 disables reporting
 
     Raises:
@@ -494,7 +494,7 @@ class ETLPipeline:
             except Exception as e:
                 self.logger.error("Error reporting stats: %s", e)
 
-    def add_completion_callback(self, callback: Callable[[PipelineResult], None]) -> None:
+    def add_completion_callback(self, callback: Callable[[WorkItemResult], None]) -> None:
         """Add a callback to be notified when items complete"""
         if self.tracker:
             self.tracker.add_completion_callback(callback)
@@ -728,7 +728,7 @@ class ETLPipeline:
 
         self.logger.info("Pipeline started successfully")
 
-    async def run(self) -> list[PipelineResult]:
+    async def run(self) -> list[WorkItemResult]:
         """
         Start the ETL pipeline and block until completion.
 
@@ -750,7 +750,7 @@ class ETLPipeline:
             ```
 
         Returns:
-            List of PipelineResults if tracking is enabled, empty list otherwise
+            List of WorkItemResults if tracking is enabled, empty list otherwise
 
         Raises:
             RuntimeError: If handlers are not registered

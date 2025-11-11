@@ -6,7 +6,7 @@ from bergtalzug import (
     ETLPipelineConfig,
     StageConfig,
     ExecutionType,
-    PipelineResult,
+    WorkItemResult,
 )
 import asyncio
 import logging
@@ -145,7 +145,7 @@ async def main() -> None:
     my_pipeline.register_stage_handler("store", store_data)
 
     # Optional: Add completion callback
-    def on_item_complete(result: PipelineResult) -> None:
+    def on_item_complete(result: WorkItemResult) -> None:
         if result.success:
             logging.info("✓ Item %s completed successfully", result.job_id)
         else:
