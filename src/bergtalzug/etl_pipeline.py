@@ -113,15 +113,13 @@ class ItemTracker:
         """
         self._items: dict[str, WorkItem] = {}
         self._completed: dict[str, WorkItemResult] = {}
-        self._lock = asyncio.Lock()
         self._callbacks: list[Callable[[WorkItemResult], None]] = []
         self._stage_names = stage_names
 
     async def register_item(self, item: WorkItem) -> None:
         """Register a new item entering the pipeline"""
-        async with self._lock:
-            self._items[item.job_id] = item
-            item.metadata.add_stage_transition("created", "queued")
+        self._items[item.job_id] = item
+        item.metadata.add_stage_transition("created", "queued")
 
     async def update_item_stage(self, job_id: str, stage: str, transition_type: str = "started") -> None:
         """
@@ -133,37 +131,33 @@ class ItemTracker:
             transition_type: Type of transition - "queued", "started", or "completed"
 
         """
-        async with self._lock:
-            if job_id in self._items:
-                self._items[job_id].metadata.add_stage_transition(stage, transition_type)
+        if job_id in self._items:
+            self._items[job_id].metadata.add_stage_transition(stage, transition_type)
 
     async def complete_item(
         self, job_id: str, success: bool = True, error: Exception | None = None
     ) -> WorkItemResult | None:
         """Mark an item as completed"""
-        callbacks_to_run = []
+        if job_id not in self._items:
+            # TODO: Maybe refactor the code to also check for correct IDs after each stage
+            # This check only applies for the refill_queue function currently
+            raise RuntimeError(
+                f"Unknown job ID: {job_id} - this could be due to `refill_queue` returning items with duplicate job IDs"
+            )
 
-        async with self._lock:
-            if job_id not in self._items:
-                # TODO: Maybe refactor the code to also check for correct IDs after each stage
-                # This check only applies for the refill_queue function currently
-                raise RuntimeError(
-                    f"Unknown job ID: {job_id} - this could be due to `refill_queue` returning items with duplicate job IDs"
-                )
+        item = self._items[job_id]
+        item.metadata.completed = datetime.now(timezone.utc)
+        item.metadata.current_stage = "completed" if success else "error"
 
-            item = self._items[job_id]
-            item.metadata.completed = datetime.now(timezone.utc)
-            item.metadata.current_stage = "completed" if success else "error"
+        result = WorkItemResult(job_id=job_id, success=success, metadata=item.metadata, error=error)
 
-            result = WorkItemResult(job_id=job_id, success=success, metadata=item.metadata, error=error)
+        self._completed[job_id] = result
+        del self._items[job_id]  # Allow garbage collection of the data
 
-            self._completed[job_id] = result
-            del self._items[job_id]  # Allow garbage collection of the data
+        # Copy callbacks for execution
+        callbacks_to_run = self._callbacks.copy()
 
-            # Copy callbacks while still under lock
-            callbacks_to_run = self._callbacks.copy()
-
-        # Run callbacks outside the lock
+        # Run callbacks
         for callback in callbacks_to_run:
             try:
                 callback(result)
@@ -178,22 +172,18 @@ class ItemTracker:
 
     async def get_active_items(self) -> list[WorkItem]:
         """Get all currently active items"""
-        async with self._lock:
-            return list(self._items.values())
+        return list(self._items.values())
 
     async def get_completed_results(self) -> list[WorkItemResult]:
         """Get all completed results"""
-        async with self._lock:
-            return list(self._completed.values())
+        return list(self._completed.values())
 
     async def get_statistics(self) -> dict[str, Any]:
         """Get pipeline statistics"""
-        # Quick snapshot under lock to avoid iteration errors
-        async with self._lock:
-            items_snapshot = list(self._items.values())
-            completed_snapshot = list(self._completed.values())
+        # Take snapshot of current state
+        items_snapshot = list(self._items.values())
+        completed_snapshot = list(self._completed.values())
 
-        # Do expensive calculations outside the lock
         active_stages: dict[str, int] = {}
         for item in items_snapshot:
             stage = item.metadata.current_stage
@@ -202,6 +192,8 @@ class ItemTracker:
         completed_count = len(completed_snapshot)
         success_count = sum(1 for r in completed_snapshot if r.success)
 
+        # TODO: Going through all completed items every time may be inefficient for large numbers of items
+        # Additionally storing all completed items is a memory leak concern
         avg_duration = None
         if completed_snapshot:
             durations = [r.total_duration for r in completed_snapshot if r.total_duration]
@@ -808,13 +800,6 @@ class ETLPipeline:
                 self._stats_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._stats_task
-
-            # TODO: Is this necessary?
-            # Close all queues
-            for stage in self._stages:
-                queue = self._queues[stage.name]
-                queue.close()
-                await queue.wait_closed()
 
             # Shutdown executors
             for executor in self._executors.values():
