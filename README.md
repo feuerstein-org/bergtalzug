@@ -343,7 +343,3 @@ Additionally each `WorkItem` has a metadata in the form of a `WorkItemMetadata` 
 ## Complete Example
 
 See `example.py` for a complete working example demonstrating all execution types and features.
-
-## Docker Support
-
-An example Dockerfile is provided showing how to use Bergtalzug's base Docker image.
